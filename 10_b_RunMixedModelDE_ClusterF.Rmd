@@ -1,0 +1,239 @@
+```{r, show=FALSE, warnings=FALSE}
+library(tidyverse)
+library(Seurat)
+library(wesanderson)
+`%notin%` <- negate(`%in%`)
+source('functions/deFunctions.R')
+```
+
+## Load classified data
+```{r}
+mb231 <- readRDS('./data/rds/mb231_colors_cellclass_hclust_nb-barassigned_ccclustered_precc_singlets.rds')
+h1806 <- readRDS('./data/rds/h1806_colors_cellclass_hclust_nb-barassigned_ccclustered_precc_singlets.rds')
+```
+
+
+```{r}
+### subset data to only have barcoded cells with at least `n_cell_min` cells per clone
+subset_bc_mincells <- function(obj, n_cell_min=3){
+  # subset data to only contain barcoded cells
+  obj_bc <- subset(obj, subset = n_bar_cell>=1)
+  
+  # find clones that have at least n_cells
+  min_cell_pass_clones <- obj_bc@meta.data %>% 
+    dplyr::select(barpairid) %>% 
+    pivot_longer(c(barpairid), values_to = 'barid') %>% 
+    drop_na() %>% 
+    group_by(barid) %>% 
+    summarize(cells_per_clone = n()) %>% 
+    dplyr::filter(cells_per_clone >= n_cell_min) %>% 
+    pull(barid) %>% 
+    unique()
+  
+  # subset to only contain high confidence fusion cells with >= n cels per clone
+  obj_bc_mincells <- subset(obj_bc, subset = barpairid %in% min_cell_pass_clones)
+  
+  obj_bc_mincells@meta.data <- obj_bc_mincells@meta.data %>% mutate(cell_class = case_when(clust=='F' ~ 'cluster_F', .default='other'))
+
+  return(list(obj_bc_mincells))
+}
+
+```
+
+
+## Subset data
+Only keep clones that are barcoded with at least `n_cell_min` cells present across all samples. 
+```{r}
+bc_mincells_h1806 <- subset_bc_mincells(h1806, n_cell_min=5)
+bc_h1806 <- bc_mincells_h1806[[1]]
+Idents(bc_h1806) <- "cell_class"
+
+bc_mincells_mb231 <- subset_bc_mincells(mb231, n_cell_min=5)
+bc_mb231 <- bc_mincells_mb231[[1]]
+Idents(bc_mb231) <- "cell_class"
+```
+
+## Inspect clonal composition of subsetted data
+```{r}
+plot_clonal_composition_byclass(bc_h1806, class_levels = c('other','cluster_F')) + ggtitle('HCC1806')
+plot_clonal_composition_byclass(bc_mb231, class_levels = c('other','cluster_F')) + ggtitle('MDA-MB-231')
+```
+
+## Perform statistical analysis of gene expression differences
+Above we see that the clonal composition is skewed, especially so in the MDA-MB-231 cells. To account for underlying clonal composition, we will used a mixed model to perform differential expression analysis, setting cell barcode as the random effect (i.e. the subject id). MAST (https://github.com/RGLab/MAST) is a package which allows for this analysis and more complex models, but is slow. NEBULA (https://github.com/lhe17/nebula) has a much faster implementation for simple mixed models when accounting for a single random effect. We will use NEBULA.
+```{r}
+sample_name = 'clusterF'
+min_pct =0.1
+test_group = 'other'
+
+
+# run mixed model for DE analysis
+h1806_neb <- run_nebula_de(bc_h1806, method='LN', min.pct=min_pct, n_cores=12, min.cpc=0.01, sid = 'barpairid', group = 'cell_class')
+mb231_neb <- run_nebula_de(bc_mb231, method='LN', min.pct=min_pct, n_cores=12, min.cpc=0.01, sid = 'barpairid', group = 'cell_class')
+
+write.table(h1806_neb[[1]], file=paste0('outdata/de_results/nebula/nebula_',min_pct,'pct_h1806_',sample_name,'_raw.tsv'), 
+            quote=FALSE, sep='\t', col.names = TRUE)
+write.table(mb231_neb[[1]], file=paste0('outdata/de_results/nebula/nebula_',min_pct,'pct_mb231_',sample_name,'_raw.tsv'), 
+            quote=FALSE, sep='\t', col.names = TRUE)
+
+capture.output(h1806_neb, file=paste0('outdata/de_results/nebula/nebula_qc/nebula_',min_pct,'pct_h1806_',sample_name,'.tsv'))
+capture.output(mb231_neb, file=paste0('outdata/de_results/nebula/nebula_qc/nebula_',min_pct,'pct_mb231_',sample_name,'.tsv'))
+
+# calculate Pearson residuals
+h1806_pres <- get_pearson_nebula(h1806_neb, bc_h1806, method='LN', min.pct=0.1, n_cores=16, min.cpc=0.01, sid = 'barpairid', group = 'cell_class')
+mb231_pres <- get_pearson_nebula(mb231_neb, bc_mb231, method='LN', min.pct=0.1, n_cores=16, min.cpc=0.01, sid = 'barpairid', group = 'cell_class')
+
+capture.output(h1806_pres, file=paste0('outdata/de_results/nebula/nebula_qc/nebula_',min_pct,'pct_h1806_',sample_name,'_pearson_residuals.tsv'))
+capture.output(mb231_pres, file=paste0('outdata/de_results/nebula/nebula_qc/nebula_',min_pct,'pct_mb231_',sample_name,'_pearson_residuals.tsv'))
+
+# format outputs for downstream analysis
+h1806_neb_format <- format_neb_outs(h1806_neb, testgroup = test_group) %>% mutate(log2FC = -log2FC) # test_group was flipped
+mb231_neb_format <- format_neb_outs(mb231_neb, testgroup = test_group) %>% mutate(log2FC = -log2FC) # test_group was flipped
+
+write.table(h1806_neb_format, file=paste0('outdata/de_results/nebula/nebula_',min_pct,'pct_h1806_',sample_name,'.tsv'), 
+            quote=FALSE, sep='\t', col.names = TRUE)
+write.table(mb231_neb_format, file=paste0('outdata/de_results/nebula/nebula_',min_pct,'pct_mb231_',sample_name,'.tsv'), 
+            quote=FALSE, sep='\t', col.names = TRUE)
+```
+
+#########
+Inspect results
+```{r}
+mb231.res <- read.csv(paste0('outdata/de_results/nebula/nebula_0.1pct_mb231_clusterF.tsv'), sep='\t') %>% arrange(desc(log2FC))
+h1806.res <- read.csv(paste0('outdata/de_results/nebula/nebula_0.1pct_h1806_clusterF.tsv'), sep='\t') %>% arrange(desc(log2FC))
+```
+
+```{r}
+l2cut = 0.2
+
+padj_cut = 0.05
+
+sig_mb231 <- mb231.res %>% filter(abs(log2FC) > l2cut, p_val_adj <= padj_cut)
+sig_h1806 <- h1806.res %>% filter(abs(log2FC) > l2cut, p_val_adj <= padj_cut)
+
+top_shared <- intersect(sig_h1806 %>% filter(log2FC > 0) %>% pull(gene), sig_mb231 %>% filter(log2FC > 0) %>% pull(gene))
+bot_shared <- intersect(sig_h1806 %>% filter(log2FC < 0) %>% pull(gene), sig_mb231 %>% filter(log2FC < 0) %>% pull(gene))
+```
+
+
+
+```{r run gsea}
+source('functions/gseaFunctions.R')
+clustF.gsea <- run_gsea_on(mb231.res, h1806.res, 
+                           min_geneset_size = 20, 
+                           gs_list = list(h.hallmarks, c5.go.biological_process, c2.KEGG, c5.go.molecular_function))
+
+
+
+source('functions/gseaFunctions.R')
+save_gsea_outs(clustF.gsea, filename='gsea_cluster_F.tsv')
+clustF.gsea <- load_gsea_outs(filename='gsea_cluster_F', data_col_id = 'cluster F')
+```
+
+
+```{r}
+n_plot= 20
+p_thresh = 1
+padj_thresh = 1
+NES_min_thresh = 0
+pick_gs = 'GOBP'#'HALLMARK'# '# 'GOBP'#'GOBP' #'HALLMARK
+
+dot_plot_gsea(clustF.gsea,
+              pick_gs = pick_gs,
+              data_title = 'cluster F',
+              pval_threshold  = p_thresh,
+              padj_threshold  = padj_thresh,
+              NES_min = NES_min_thresh,
+              n_pathway_plot = n_plot,
+              min_celllines_in=2,
+              gs_name_length=1,
+              only_pos = FALSE)
+```
+
+```{r}
+### ### ### ### ### ### ### ### ### ### ### ### ### ### ### ### ### ### ### 
+### plot results
+
+pick_gs = 'KEGG'
+#pick_gs = 'GOBP'
+gsea.outs = clustF.gsea 
+pval_threshold  = 1
+padj_threshold  = 1
+NES_min = 0
+n_pathway_plot = 50
+min_celllines_in=2
+gs_name_length=3
+data_title = 'cluster F'
+only_pos = TRUE
+  # relabel pathway to not include underscores and gene set name, create new column with gene set name
+  # only plot pathways which are significant in at least one cell line
+  filterpaths <- gsea.outs %>% filter(gs==pick_gs) %>% rowwise() %>% mutate(gs = paste((str_split(pathway, pattern='_')[[1]][1:gs_name_length]),  collapse = " ")) %>% 
+    mutate(pathway = paste((str_split(pathway, pattern='_')[[1]][-1:-gs_name_length]),  collapse = " ")) %>% 
+    group_by(pathway) %>% mutate(n_samples = n()) %>% ungroup() %>% filter(n_samples >= min_celllines_in) %>% group_by(pathway) %>% 
+    mutate(sumNES = sum(NES, na.rm=TRUE)) %>% arrange(desc(sumNES))
+  
+  
+  top_mb231 <- filterpaths %>% 
+    filter(cellline == 'MDA-MB-231') %>% 
+    filter(padj <= pval_threshold & padj <= padj_threshold & NES >= NES_min ) %>% 
+    arrange(desc(NES)) %>% 
+    head(n_pathway_plot) %>%
+    pull(pathway)
+  
+  top_h1806 <- filterpaths %>% 
+    filter(cellline == 'HCC1806') %>% 
+    filter(padj <= pval_threshold & padj <= padj_threshold & NES >= NES_min ) %>% 
+    arrange(desc(NES)) %>% 
+    head(n_pathway_plot) %>%
+    pull(pathway)
+  
+  bot_mb231 <- filterpaths %>% 
+    filter(cellline == 'MDA-MB-231') %>% 
+    filter(padj <= pval_threshold & padj <= padj_threshold & NES <= -NES_min ) %>% 
+    arrange((NES)) %>% 
+    head(n_pathway_plot) %>%
+    pull(pathway)
+  
+  bot_h1806 <- filterpaths %>% 
+    filter(cellline == 'HCC1806') %>% 
+    filter(padj <= pval_threshold & padj <= padj_threshold & NES <= -NES_min ) %>% 
+    arrange((NES)) %>% 
+    head(n_pathway_plot) %>%
+    pull(pathway)
+  
+  # extract pathways that are high in both and significant in at least one
+  high <- c(top_mb231, top_h1806)
+  # extract pathways that are low in both and significant in at least one
+  lows <- c(bot_mb231, bot_h1806)
+  
+  if(only_pos == TRUE){
+    lows <- c()
+  }
+  
+  # filter data for plotting
+  fgsea.outs.plot <- filterpaths %>% filter(pathway %in% c(high, lows)) %>% arrange(sumNES) %>% dplyr::select(pathway, padj, NES, cellline, gs, sumNES)
+   means <- fgsea.outs.plot %>% group_by(pathway) %>% summarize(, padj = mean(padj), NES = mean(NES)) %>% mutate(cellline = 'mean', gs=pick_gs, sumNES=0)
+  
+  fgsea.outs.plot <- rbind(fgsea.outs.plot, means)
+  
+  # set plot order
+  #fgsea.outs.plot$pathway <- factor(x = fgsea.outs.plot$pathway, levels = unique(fgsea.outs.plot$pathway))
+  fgsea.outs.plot$pathway <- factor(x = fgsea.outs.plot$pathway, levels = fgsea.outs.plot %>% filter(cellline=='mean') %>% arrange((NES)) %>% pull(pathway))
+  
+  
+  dot_plot <- ggplot(fgsea.outs.plot, aes(y=pathway, x=NES)) +
+    geom_point(aes(color=as.factor(cellline), size=-log10(padj)), alpha=0.8) +
+    theme_bw() + 
+    scale_color_manual(values=c('MDA-MB-231'='#F8766D', 'HCC1806'='#00BFC4', 'mean' = 'black')) +
+    ggtitle(paste0(pick_gs,' ',data_title)) + ylab('') + labs(color = "cell line") + geom_vline(xintercept=0, linewidth=0.1) + 
+    theme(axis.text.y = element_text(size = 5))
+
+  dot_plot
+```
+
+
+
+```{r}
+sessionInfo()
+```
+

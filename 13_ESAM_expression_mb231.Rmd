@@ -1,0 +1,46 @@
+```{r}
+library(tidyverse)
+library(Seurat)
+source('functions/ggumap.R')
+fig_path <- "./plots/esam_expression/"
+```
+
+```{r}
+mb231 <- readRDS('./data/rds/mb231_colors_cellclass_hclust_nb-barassigned_ccclustered_precc_singlets.rds')
+```
+
+```{r}
+esam_expression <- FetchData(mb231, vars = 'ESAM')
+
+esam_expression
+
+mb231 <- AddMetaData(mb231, esam_expression)
+
+emb <- get_embedding(mb231)
+
+emb$condition[emb$condition=='ctrl'] <- 'control'
+emb$condition[emb$condition=='fusion'] <- 'fusion-\nenriched'
+emb$condition[emb$condition=='presort'] <- 'pre-sort'
+
+emb$condition <- factor(emb$condition, levels = c('initial','pre-sort','control','fusion-\nenriched'))
+
+emb$scaled_minmax = MinMax(data = emb$ESAM, min = 0, max = 1)
+
+fulldata <- 
+  ggumap(emb) + geom_point(size=0.1, aes(color=scaled_minmax), alpha=0.8) +
+  scale_colour_gradient(low = "grey85", high = "darkblue") + theme_void() +
+  theme(aspect.ratio = 0.8) + #ggtitle('ESAM expression') +
+  labs(color='Scaled ESAM \nexpression')
+
+
+facet <- fulldata + facet_wrap(~condition)
+
+fulldata
+facet
+
+
+SaveFigure(fulldata, 'mb231_umap_esam_full', type = "png", width=6, height=4, res=600)
+SaveFigure(facet, 'mb231_umap_esam_facet', type = "png", width=6, height=4, res=600)
+```
+
+

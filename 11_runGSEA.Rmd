@@ -1,0 +1,43 @@
+```{r}
+library(tidyverse)
+library(fgsea)
+`%notin%` <- negate(`%in%`)
+source('functions/gseaFunctions.R')
+```
+
+This notebook imports DE results from nebula, runs GSEA, and save GSEA results under the same file identifier as the DE results in 'outdata/gsea_results'
+```{r}
+# (a) PARENT - non-random parents versus other clones
+run_and_save_gsea(de_tsv_name = 'binom_fusers_p05', 
+                  gs_list = list(h.hallmarks, 
+                                 c5.go.biological_process, 
+                                 c2.KEGG, 
+                                 c5.go.molecular_function)
+                  )
+
+# (b) CLUSTER F - ALL cells in cluster F versus ALL cells in other clusters
+run_and_save_gsea(de_tsv_name = 'clusterF', 
+                  gs_list = list(h.hallmarks, 
+                                 c5.go.biological_process, 
+                                 c2.KEGG, 
+                                 c5.go.molecular_function)
+                  )
+
+# (c) CLUSTER F - FUSION cells in cluster F versus FUSION cells in other clusters
+run_and_save_gsea(de_tsv_name = 'fusion_in_clustF_vs_other', 
+                  gs_list = list(h.hallmarks, 
+                                 c5.go.biological_process, 
+                                 c2.KEGG, 
+                                 c5.go.molecular_function)
+                  )
+
+# (d) FUSION - all fusion cells versus all sorted control cells
+run_and_save_gsea(de_tsv_name = 'fusion_v_control', 
+                  gs_list = list(h.hallmarks, 
+                                 c5.go.biological_process, 
+                                 c2.KEGG, 
+                                 c5.go.molecular_function)
+                  )
+```
+
+

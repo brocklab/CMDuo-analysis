@@ -1,0 +1,516 @@
+```{r, show=FALSE, warning=FALSE, quiet=TRUE}
+library(tidyverse)
+library(Seurat)
+library(wesanderson)
+library(scales)
+library(scatterpie)
+library(patchwork)
+suppressPackageStartupMessages( library(easyalluvial) )
+source('functions/ggumap.R')
+source('functions/Cluster2ClusterScatterpie.R')
+source('functions/color_mapping.R')
+`%notin%` <- negate(`%in%`)
+fig_path <- "./plots/cluster-to-cluster/"
+```
+
+
+```{r load data}
+cellline='h1806'
+#cellline='mb231'
+
+
+if(cellline=='mb231'){
+  mb231 <- readRDS('./data/rds/mb231_colors_cellclass_hclust_nb-barassigned_ccclustered_precc_singlets.rds')
+}
+if(cellline=='h1806'){
+  h1806 <- readRDS('./data/rds/h1806_colors_cellclass_hclust_nb-barassigned_ccclustered_precc_singlets.rds')
+}
+```
+
+```{r pick cell line}
+min_cells = 5
+
+if(cellline=='mb231'){
+  dat <- mb231
+}
+
+if(cellline=='h1806'){
+  dat <- h1806
+}
+
+# full data, but subsetted on barcoded cells
+obj_bc <- subset(dat, subset = n_bar_cell >= 1 & clone_color !='unassigned')
+
+
+# Find high confidence fusion clones and related parental barcodes
+fusion_pairs <- dat@meta.data %>% filter(isConfidentFusion==TRUE) %>% select(gbarid, rbarid, barpairid) %>% distinct()
+
+# assign cell class
+dat@meta.data <- dat@meta.data %>% 
+  mutate(cell_class = case_when(fusion %in% c('fusion') ~ 'fusion', 
+                                barpairid %in% c(fusion_pairs$gbarid, fusion_pairs$rbarid) ~ 'parent', 
+                                .default = 'unassigned'))
+
+# plot all data
+ggumap(get_embedding(dat)) + geom_point(aes(color=as.factor(clust)),alpha=0.5,size=0.1) + labs(color='cluster') + theme(aspect.ratio = 0.8)
+
+# subset data to only contain high confidence fusion cells and their parents
+parent_conds <- c('initial','presort')
+dat_fusionset <- subset(dat, 
+                        subset = (    gbarid %in% fusion_pairs$gbarid    & condition %in% parent_conds & fusion != 'fusion') |
+                                 (    rbarid %in% fusion_pairs$rbarid    & condition %in% parent_conds & fusion != 'fusion') |
+                                 ( barpairid %in% fusion_pairs$barpairid & condition=='fusion'  & fusion == 'fusion') )
+
+dat_fusionset_mincells <- fusionset_mincell_subset(dat_fusionset, fusion_pairs, cell_min=min_cells)
+
+fusion_pairs_keep <- dat_fusionset_mincells@meta.data %>% 
+  filter(isConfidentFusion==TRUE) %>% select(gbarid, rbarid, barpairid) %>% distinct() %>% remove_rownames()
+
+####
+
+# plot subsetted data
+ggumap(get_embedding(dat_fusionset)) + geom_point(aes(color=as.factor(clust)),alpha=0.5,size=0.2) + labs(color='cluster') + ggtitle('fusion sets') + theme(aspect.ratio = 0.8) + scale_color_manual(values=clust_colors)
+
+ggumap(get_embedding(dat_fusionset_mincells)) + geom_point(aes(color=as.factor(clust)),alpha=0.5,size=0.5) + labs(color='cluster') + ggtitle(paste0('fusion sets ',min_cells,' min'))  + theme(aspect.ratio = 0.8) + scale_color_manual(values=clust_colors)
+
+ggumap(get_embedding(dat_fusionset_mincells)) + geom_point(aes(color=as.factor(clone_color)),alpha=0.5,size=0.2) + scale_color_manual(values=index_colors) + labs(color='index color') + ggtitle(paste0('fusion sets ',min_cells,' min')) + theme(aspect.ratio = 0.8)
+```
+
+
+```{r scatterpie}
+# calculate pct cluster per clone
+pct_bar_clust <- per_clone_cluster(dat_fusionset_mincells, min_pct_in_clust = 0.0)
+
+# # get fusion trio groupings
+fusion_group_meta <- fusion_pairs_keep %>% 
+  mutate(groupid = barpairid) %>% 
+  pivot_longer(-c(groupid), values_to = 'barpairid') %>% 
+  distinct() %>% 
+  dplyr::select(-name)
+
+# # add fusion trio groupings information
+pct_bar_clust_allgroups <- left_join(pct_bar_clust, fusion_group_meta, by='barpairid')
+
+# hierarchical cluster fusion clones based on % representation in different clusters
+fuse_clust_pct <- pct_bar_clust %>% 
+  filter(clone_color=='fusion') %>% 
+  select(barpairid, clust, pct_bar_in_clust) %>% 
+  arrange(clust) %>% 
+  pivot_wider(names_from = clust, values_from = pct_bar_in_clust) %>% 
+  mutate(across(everything(), ~ replace_na(.x, 0))) %>% column_to_rownames('barpairid')
+
+mat <- as.matrix(fuse_clust_pct)
+distance <- dist(mat, method = 'euclidean')
+hdist <- hclust(distance)
+
+plot(hdist)
+abline(h = 5, col = "red")
+fuse_meta <- data.frame(sim_order = hdist$order, groupid=hdist$labels) %>% arrange(sim_order)
+
+
+if(cellline=='h1806'){
+  pct_clust <- cutree(hdist, k = 4)
+}
+
+if(cellline=='mb231'){
+  pct_clust <- cutree(hdist, k = 4)
+}
+
+pct_clust_df <- left_join(data.frame(pct_clust) %>% rownames_to_column('groupid'), fuse_meta)
+
+pct_bar_clust_allgroups <- left_join(pct_bar_clust_allgroups, pct_clust_df, by='groupid') %>% ungroup()
+
+  
+#########################
+for(i in seq(1,max(pct_clust))){
+  print(
+    make_scatterpie(dat, pct_bar_clust_allgroups, pct_clust_df, pick_sim_clust = c(i))[[1]] + 
+      theme(legend.position = 'none') + ggtitle(paste0('cut ',i))
+        )
+}
+
+if(cellline=='mb231'){
+  plot_height=10
+}else{
+  plot_height=20
+}
+
+p_all <- make_scatterpie(dat, pct_bar_clust_allgroups, pct_clust_df, pick_sim_clust = c(1,2,3,4,5,6), flip_coord=TRUE)[[1]] + theme(legend.position = 'none') 
+SaveFigure(p_all, paste0(cellline, '_scatterpie_vertical'), type = "png", width=3, height=plot_height, res=1000)
+```
+
+
+```{r alluvial}
+pcb <- per_clone_cluster(dat_fusionset_mincells, min_pct_in_clust = 0)
+
+assign <- assign_metacluster_row_pct(pcb, scale_factor=10)
+
+
+map_set_sankey_wide <- format_flow_data(assign, format='alluvial')
+
+if(cellline=='mb231'){
+  cols=clust_colors[c('A','B','C','F')]
+}else{
+  cols=clust_colors
+}
+
+pa <- plot_alluvial(map_set_sankey_wide, color_map=cols)
+
+SaveFigure(pa, paste0(cellline, '_alluvial'), 
+           type = "png", width=20, height=12, res=300)
+```
+
+
+```{r pretty umaps}
+bc_colors <- get_clone_colors(dat)
+
+plot_obj_full <- obj_bc #dat
+plot_obj <- dat_fusionset_mincells
+
+
+ppumap_full_phase <- ggumap(get_embedding(plot_obj_full) %>% mutate(Phase = factor(Phase, levels=c('G1','S','G2M')))) +
+  theme_void() +
+  geom_point(aes(color=Phase),alpha=0.7, size=0.5, shape=16) + 
+  labs(color='Phase') + 
+  theme(strip.background = element_blank(), aspect.ratio = 0.8)
+
+ppumap_full <- ggumap(get_embedding(plot_obj_full)) +
+  theme_void() +
+  geom_point(aes(color=as.factor(clust)),alpha=0.7, size=0.5, shape=16) + 
+  scale_color_manual(values=clust_colors) +
+  labs(color='Cluster') + 
+  theme(strip.background = element_blank(), aspect.ratio = 0.8)
+
+ppumap_color_full <- ggumap(get_embedding(plot_obj_full)) +
+  theme_void() +
+  geom_point(aes(color=clone_color),alpha=0.7, size=0.5, shape=16) + scale_color_manual(values=index_colors) +
+  labs(color='CMDuo index') + 
+  theme(strip.background = element_blank(), 
+        strip.text.x = element_text(size = 14),
+        aspect.ratio = 0.8)
+
+ppumap_clone_color_full <- ggumap(get_embedding(plot_obj_full))  +
+  geom_point(aes(color=barpairid),alpha=0.7, size=0.5, shape=16) + 
+  theme_void() + 
+  scale_color_manual(values=bc_colors) +
+  labs(color='Cluster') + 
+  theme(legend.position='none', strip.background = element_blank(), aspect.ratio = 0.8) +
+  guides(color = guide_legend(override.aes = list(size = 1))) 
+
+
+ppumap_nofacet <- ggumap(get_embedding(plot_obj) %>% mutate(
+  cell_class=case_when(cell_class=='fusion'~'fusion', .default='parent'))
+  ) + theme_void() + 
+  geom_point(aes(color=as.factor(clust)),alpha=0.8, size=0.5, shape=16) + 
+  scale_color_manual(values=clust_colors) +
+  labs(color='Cluster') + 
+  theme(strip.background = element_blank(), aspect.ratio = 0.8)
+
+ppumap <- ppumap_nofacet + theme_void() +
+  facet_wrap(~factor(cell_class, levels=c('parent','fusion'))) + 
+  theme(strip.background = element_blank(), 
+        strip.text.x = element_text(size = 14),
+        aspect.ratio = 0.8,
+        legend.position = 'none')
+
+ppumap_color_nofacet <- ggumap(get_embedding(plot_obj) %>% mutate(
+  cell_class=case_when(cell_class=='fusion'~'fusion', .default='parent'))
+  ) + theme_void() +
+  geom_point(aes(color=clone_color),alpha=0.8, size=0.5, shape=16) + scale_color_manual(values=index_colors) +
+  labs(color='CMDuo index') + 
+  theme(strip.background = element_blank(), 
+        strip.text.x = element_text(size = 14),
+        aspect.ratio = 0.8) 
+
+ppumap_color <- ppumap_color_nofacet + theme_void() +
+  facet_wrap(~factor(cell_class, levels=c('parent','fusion'))) + 
+  theme(strip.background = element_blank(), 
+        strip.text.x = element_text(size = 14),
+        aspect.ratio = 0.8,
+        legend.position = 'none') 
+
+
+ppumap_clone_color_nofacet <- ggumap(get_embedding(plot_obj) %>% mutate(
+  cell_class=case_when(cell_class=='fusion'~'fusion', .default='parent'))
+  ) + theme_void() +
+  geom_point(aes(color=barpairid),alpha=0.8, size=0.5, shape=16) + 
+  scale_color_manual(values=bc_colors) +
+  labs(color='Cluster') + 
+  theme(legend.position='none', strip.background = element_blank(), aspect.ratio = 0.8) +
+  guides(color = guide_legend(override.aes = list(size = 1))) 
+
+ppumap_clone_color <- ppumap_clone_color_nofacet + 
+  facet_wrap(~factor(cell_class, levels=c('parent','fusion'))) +
+  theme_void() + 
+  theme(legend.position='none',strip.background = element_blank(), strip.text.x = element_text(size = 14), aspect.ratio = 0.8)
+
+
+ppumap
+ppumap_color
+ppumap_nofacet
+ppumap_clone_color_nofacet
+ 
+ w = 5
+fw = 8
+ h = 3
+ 
+ 
+SaveFigure(ppumap_full, paste0(cellline,'_umap_clustered_full'), type = "png",
+           width=w,  height=h, res=600)
+
+SaveFigure(ppumap_full_phase, paste0(cellline,'_umap_cell_cycle_phase'), type = "png",
+           width=w,  height=h, res=600)
+
+SaveFigure(ppumap_color_full, paste0(cellline,'_umap_color_full'), type = "png",
+           width=w,  height=h, res=600)
+
+SaveFigure(ppumap_clone_color_full, paste0(cellline,'_umap_clone_color_full'), type = "png",
+           width=w,  height=h, res=600)
+
+SaveFigure(ppumap_nofacet, paste0(cellline,'_alluvial_subset_umap_nofacet'), type = "png",
+           width=w,  height=h, res=600)
+SaveFigure(ppumap, paste0(cellline,'_alluvial_subset_umap'), type = "png",
+           width=fw, height=h, res=600)
+
+SaveFigure(ppumap_color_nofacet, paste0(cellline,'_alluvial_subset_umap_color_nofacet'), type = "png",
+           width=w,  height=h, res=600)
+SaveFigure(ppumap_color, paste0(cellline,'_alluvial_subset_umap_color'), type = "png",
+           width=fw, height=h, res=600)
+
+SaveFigure(ppumap_clone_color_nofacet, paste0(cellline,'_alluvial_subset_umap_clone_color_nofacet'), type = "png",
+           width=w,  height=h, res=600)
+SaveFigure(ppumap_clone_color, paste0(cellline,'_alluvial_subset_umap_clone_color'), type = "png",
+           width=fw, height=h, res=600)
+```
+
+
+```{r}
+font.size=2
+
+find_perc_fusion_byClone <- function(dat_meta){
+  countbar_df <- dat_meta %>% select(barpairid, clust, cellLine, cell_class) 
+  totals <- countbar_df %>% group_by(clust, cellLine) %>% summarize(barcount_total = n())
+  each <- countbar_df %>% group_by(clust, cellLine, cell_class) %>% summarize(barcount_each = n())
+  abund <- left_join(each, totals) %>% mutate(abundance = barcount_each/barcount_total) %>% distinct() %>% arrange(desc(abundance))
+  abund <- abund %>% mutate(old_class=cell_class)
+  abund$cell_class[abund$cell_class=='progeny'] <-'fusion'
+  return(abund)
+}
+
+abund <- dat@meta.data %>% filter(n_bar_cell >=1) %>% select(barpairid, clust, cellLine, cell_class) %>% group_by(clust) %>% mutate(cellcount_per_clust = n(), n_unique_clones_in_cluster = length(unique(barpairid))) %>% group_by(clust, cellLine, cell_class) %>% mutate(class_cells_per_cluster = n()) %>% mutate(class_clust_abundance_cells = class_cells_per_cluster/cellcount_per_clust) %>% mutate(n_class_clones_in_cluster = length(unique(barpairid))) %>% mutate(class_clust_abundance_clones = n_class_clones_in_cluster/n_unique_clones_in_cluster) %>% select(-barpairid) %>% distinct() %>% arrange(clust, cell_class)
+
+
+abund$cell_class[abund$cell_class=='unassigned'] <- 'other'
+  
+abund$cell_class <- factor(abund$cell_class, levels = c('fusion','parent','other'))
+  
+test <- abund %>% select(clust, cell_class, class_clust_abundance_cells, class_clust_abundance_clones) %>% pivot_longer(c(class_clust_abundance_cells, class_clust_abundance_clones), names_to = 'abund_type', values_to = 'abundance')
+
+
+# clone_count_size = 2
+#   ggplot(test, aes(fill=reorder(as.factor(cell_class),cell_class), y=abundance, x=as.factor(clust))) +
+#     geom_bar(stat="identity", color='black', size=0.1, position = position_stack(reverse = TRUE)) +
+#     theme_classic() +
+#     theme(strip.background = element_blank(), legend.title = element_text(size=font.size), legend.text=element_text(size=font.size)) +
+#     scale_fill_manual(values=c('parent'='grey30','progeny'='#c27100','other'='grey90','fusion'='#c27100'), name = "cell class") +
+#     ylab('Proportion of cells') + xlab('Cluster') + facet_wrap(~abund_type) +
+#      guides(fill = guide_legend(override.aes = list(size = 10))) +
+# geom_text(data = abund %>% select(clust, cell_class, n_class_clones_in_cluster) %>% distinct(),
+#             position = position_dodge(width=0.9),
+#             vjust = 0.5,
+#             size=clone_count_size,
+#             aes(x=as.factor(clust), y=1.05,
+#                 label=paste0(n_class_clones_in_cluster)))
+  
+```
+
+
+```{r percent fusio or parent in each cluster}
+#### percent fusion in each cluster
+find_perc_fusion <- function(dat_meta){
+  countbar_df <- dat_meta %>% select(barpairid, clust, cellLine, cell_class) 
+  totals <- countbar_df %>% group_by(clust, cellLine) %>% summarize(barcount_total = n())
+  each <- countbar_df %>% group_by(clust, cellLine, cell_class) %>% summarize(barcount_each = n())
+  abund <- left_join(each, totals) %>% mutate(abundance = barcount_each/barcount_total) %>% distinct() %>% arrange(desc(abundance))
+  abund <- abund %>% mutate(old_class=cell_class)
+  abund$cell_class[abund$cell_class=='progeny'] <-'fusion'
+  return(abund)
+}
+
+plot_perc_fusion<- function(abund, font.size=8, legend.box.scale=0.001){
+  abund$cell_class[abund$cell_class=='unassigned'] <- 'other'
+  
+  abund$cell_class <- factor(abund$cell_class, levels = c('fusion','parent','other'))
+  
+  ggplot(abund, aes(fill=reorder(as.factor(cell_class),cell_class), y=abundance, x=as.factor(clust))) + 
+    geom_bar(stat="identity", color='black', size=0.1, position = position_stack(reverse = TRUE)) + 
+    theme_classic() + 
+    theme(strip.background = element_blank(), legend.title = element_text(size=font.size), legend.text=element_text(size=font.size)) +
+    scale_fill_manual(values=c('parent'='grey30','progeny'='#c27100','other'='grey90','fusion'='#c27100'), name = "cell class") + 
+    ylab('Proportion of cells') + xlab('Cluster') + 
+    guides(fill = guide_legend(override.aes = list(size = legend.box.scale))) 
+}
+
+
+percent_fusion <- find_perc_fusion(dat_meta = dat@meta.data)
+ppf <- plot_perc_fusion(percent_fusion) 
+
+ppf
+
+SaveFigure(ppf, paste0(cellline,'_cluster_percent_fusion_fusiontestsubset'), type = "png", 
+           width=4, height=3, res=600)
+```
+
+```{r percent fusion cells and clones in each cluster}
+#library(ggrepel)
+# what percent of fusion cells is in each meta cluster?
+uniq <- obj_bc@meta.data %>% select(barpairid, fusion, clust, condition) %>% filter(fusion=='fusion', condition=='fusion')  %>% group_by(clust) %>% summarize(n_clones=length(unique(barpairid)))
+
+total <- obj_bc@meta.data %>% select(barpairid, fusion, clust, condition) %>% filter(fusion=='fusion', condition=='fusion')  %>% group_by(clust) %>% summarize(n_cells=length((barpairid)))
+
+cells <- total %>% mutate(`cells` = round(100*n_cells/sum(total$n_cells),2))
+
+clones <- uniq %>% mutate(`clones` = round(100*n_clones/sum(uniq$n_clones),2))
+
+fusion_per_cluster <- left_join(cells, clones, by='clust')
+
+fusion_per_cluster_long <- fusion_per_cluster %>% pivot_longer(c(`cells`,`clones`), names_to='stat', values_to='percent')
+
+n_clust <- length(unique(obj_bc@meta.data$clust))
+
+
+leg.font.size = 16
+axis.title.font.size = 18
+axis.text.font.size = 16
+label.size = 5
+
+dfus <- ggplot(fusion_per_cluster_long, aes(x=as.factor(clust), y=percent, fill=stat)) +
+  geom_bar(stat='identity', position="dodge", color='black', size=0.1) + 
+  theme_classic() + 
+  theme(strip.background = element_blank(), 
+          legend.text=element_text(size=leg.font.size),
+          axis.title = element_text(size = axis.title.font.size),
+          axis.text.y= element_text(size = axis.text.font.size),
+        axis.text.x = element_text(size = axis.text.font.size, vjust=4),
+        axis.line.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+  scale_fill_manual(values=c('cells'=wes_palette("Moonrise1")[1], 
+                             'clones'=wes_palette("Moonrise1")[2], 
+                             clust_colors),
+                    breaks = c('cells','clones'))  + 
+  ylab('Percent of all fusion events (%)') + 
+  xlab('Cluster') + 
+  labs(fill='') +
+  geom_text(position=position_dodge(width=0.9), aes(label=paste0(round(percent,1))), size=label.size, vjust=-0.5) + 
+  geom_tile(data = obj_bc@meta.data %>% select(clust) %>% distinct(), 
+                aes(x=clust, y=-1.5, fill = clust), 
+                width = 0.95, height = 1.25, inherit.aes = FALSE) +
+  ylim(-2.5,70) +
+  geom_hline(yintercept = 0, size = 0.25)
+
+
+
+dfus <- dfus + scale_x_discrete(limits=LETTERS[1:7]) 
+
+dfus
+
+# fusion_per_cluster
+# sum(fusion_per_cluster$n_cells)
+
+#SaveFigure(dfus, paste0(cellline,'_distribution_of_fusion_cellsClones_in_metaclusters'), type = "png", width=6, height=3, res=600)
+SaveFigure(dfus, paste0(cellline,'_distribution_of_fusion_cellsClones_in_metaclusters'), type = "png", width=9, height=4, res=600)
+
+
+dfus_facet <- dfus + #geom_text(aes(label=paste0(round(percent,1),'%')), size=label.size, vjust=-0.5) +
+facet_wrap(~stat) + theme(strip.text.x = element_blank())
+
+SaveFigure(dfus_facet, paste0(cellline,'_distribution_of_fusion_cellsClones_in_metaclusters_facet'), type = "png", width=6, height=3, res=600)
+
+```
+
+```{r percent parent cells and clones in each cluster}
+# what percent of parent cells is in each meta cluster?
+uniq <- obj_bc@meta.data %>% select(barpairid, fusion, clust, condition, n_isFusionParent) %>% filter(n_isFusionParent >=1, fusion!='fusion', condition=='presort')  %>% group_by(clust) %>% summarize(n_clones=length(unique(barpairid)))
+
+total<-obj_bc@meta.data %>% select(barpairid, fusion, clust, condition, n_isFusionParent) %>% filter(n_isFusionParent >=1, fusion!='fusion', condition=='presort')  %>% group_by(clust) %>% summarize(n_cells=length((barpairid)))
+
+cells <- total %>% mutate(`cells` = round(100*n_cells/sum(total$n_cells),2))
+
+clones <- uniq %>% mutate(`clones` = round(100*n_clones/sum(uniq$n_clones),2))
+
+fusion_per_cluster <- left_join(cells, clones, by='clust')
+
+fusion_per_cluster_long <- fusion_per_cluster %>% pivot_longer(c(`cells`,`clones`), names_to='stat', values_to='percent')
+
+n_clust <- length(unique(dat@meta.data$clust))
+
+dpar <- ggplot(fusion_per_cluster_long, aes(x=as.factor(clust), y=percent, fill=stat)) +
+  geom_bar(stat='identity', position="dodge", color='black', size=0.1) + 
+  theme_classic() + 
+  theme(strip.background = element_blank(), 
+          legend.text=element_text(size=leg.font.size),
+          axis.title = element_text(size = axis.title.font.size),
+          axis.text.y= element_text(size = axis.text.font.size),
+        axis.text.x = element_text(size = axis.text.font.size, vjust=4),
+        axis.line.x=element_blank(),
+        axis.ticks.x=element_blank())  +
+  scale_fill_manual(values=c('cells'='grey60', 
+                             'clones'='grey20', 
+                             clust_colors),
+                    breaks = c('cells','clones'))  + 
+  ylab('Parental clone origin (%)') + 
+  xlab('Cluster') + 
+  labs(fill='') +
+  geom_text(position=position_dodge(width=0.9), aes(label=paste0(round(percent,1))), size=label.size, vjust=-0.5) + 
+  geom_tile(data = obj_bc@meta.data %>% select(clust) %>% distinct(), 
+                aes(x=clust, y=-1.5, fill = clust), 
+                width = 0.95, height = 1.25, inherit.aes = FALSE) +
+  ylim(-2.5,70) +
+  geom_hline(yintercept = 0, size = 0.25)
+
+dpar
+
+SaveFigure(dpar, paste0(cellline,'_distribution_of_parent_cellsClones_in_metaclusters'), type = "png", width=9, height=4, res=600)
+
+
+dpar_facet <- dpar +
+geom_text(aes(label=paste0(round(percent,1),'%')),size=2.5, vjust=-0.5) +
+facet_wrap(~stat) + theme(strip.text.x = element_blank())
+
+SaveFigure(dpar_facet, paste0(cellline,'_distribution_of_parent_cellsClones_in_metaclusters_facet'), type = "png", width=6, height=3, res=600)
+
+```
+
+```{r percent fusion cells and clones in each cluster by REPLICATE}
+# what percent of fusion cells is in each meta cluster?
+uniq<-dat@meta.data %>% select(barpairid, fusion, clust, condition, replicate) %>% filter(fusion=='fusion', condition=='fusion')  %>% group_by(clust, replicate) %>% summarize(n_clones=length(unique(barpairid)))
+
+total<-dat@meta.data %>% select(barpairid, fusion, clust, condition, replicate) %>% filter(fusion=='fusion', condition=='fusion')  %>% group_by(clust, replicate) %>% summarize(n_cells=length((barpairid)))
+
+cells <- total %>% mutate(`cells` = round(100*n_cells/sum(total$n_cells),2))
+
+clones <- uniq %>% mutate(`unique clones` = round(100*n_clones/sum(uniq$n_clones),2))
+
+fusion_per_cluster <- left_join(cells, clones, by=c('clust','replicate'))
+
+fusion_per_cluster_long <- fusion_per_cluster %>% pivot_longer(c(`cells`,`unique clones`), names_to='stat', values_to='percent')
+
+n_clust <- length(unique(dat@meta.data$clust))
+
+
+dfus_rep <- ggplot(fusion_per_cluster_long, aes(x=as.factor(clust), y=percent, fill=stat)) +
+  geom_bar(stat='identity', position="dodge", color='black', size=0.1) + 
+    theme_classic() + theme(strip.background = element_blank()) +
+    scale_fill_manual(values=wes_palette("Moonrise1"))  + 
+    ylab('Percent of all fusion events (%)') + xlab('Cluster') + labs(fill='')  +
+  facet_wrap(~replicate, ncol=1)
+
+dfus_rep <- dfus_rep  + scale_x_discrete(limits=LETTERS[1:7]) 
+
+
+dfus_rep
+
+SaveFigure(dfus_rep, paste0(cellline,'_distirbution_of_fusion_cellsClones_in_metaclusters_replicate_split'), type = "png", 
+           width=4, height=6, res=600)
+```
+

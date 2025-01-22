@@ -1,0 +1,222 @@
+```{r, show=FALSE, warnings=FALSE}
+library(tidyverse)
+library(Seurat)
+library(wesanderson)
+library(cowplot)
+`%notin%` <- negate(`%in%`)
+source('functions/UniqueBarcodeColorAssignments.R')
+source('functions/BarcodeAbundance.R')
+source('functions/ggumap.R')
+source('functions/color_mapping.R')
+```
+
+## Load classified data
+```{r}
+mb231 <- readRDS('./data/rds/mb231_cellclass_hclust_nb-barassigned_ccclustered_precc_singlets.rds')
+h1806 <- readRDS('./data/rds/h1806_cellclass_hclust_nb-barassigned_ccclustered_precc_singlets.rds')
+```
+
+
+## Make standard plots showing different sample subsets
+```{r}
+h1806_plots <- condition_plots(h1806, strip.font.size=14)
+mb231_plots <- condition_plots(mb231, strip.font.size=14)
+
+h1806_plots[[3]]
+mb231_plots[[3]]
+
+SaveFigure(h1806_plots[[1]], 'h1806_umap_condition_allcells', type = "png", width=6, height=4, res=600)
+SaveFigure(mb231_plots[[1]], 'mb231_umap_condition_allcells', type = "png", width=6, height=4, res=600)
+SaveFigure(h1806_plots[[2]], 'h1806_umap_condition_allcells_cond', type = "png", width=6, height=4, res=600)
+SaveFigure(mb231_plots[[2]], 'mb231_umap_condition_allcells_cond', type = "png", width=6, height=4, res=600)
+SaveFigure(h1806_plots[[3]], 'h1806_umap_condition_allcells_reps', type = "png", width=6, height=4, res=600)
+SaveFigure(mb231_plots[[3]], 'mb231_umap_condition_allcells_reps', type = "png", width=6, height=4, res=600)
+SaveFigure(h1806_plots[[4]], 'h1806_umap_condition_allcells_reps_cond', type = "png", width=6, height=4, res=600)
+SaveFigure(mb231_plots[[4]], 'mb231_umap_condition_allcells_reps_cond', type = "png", width=6, height=4, res=600)
+```
+
+
+## Assign unique colors to each barcode and set of barcodes
+```{r}
+mb231_colors <- give_color_to_each_barcode(mb231)[[1]]
+h1806_colors <- give_color_to_each_barcode(h1806)[[1]]
+```
+
+## Plot population statistics
+```{r}
+#source('functions/BarcodeAbundance.R')
+
+count_size = 3
+facet_font = 16
+axis_font = 16
+axis_tick_font = 16
+legend_font = 12
+
+nbars_legend <- plot_perc_nbars_bw(find_perc_nbars(mb231_colors, show_unassigned = FALSE), 
+                                     strip.font.size=facet_font,
+                                     axis.title.font.size = axis_font,
+                                     axis.text.font.size = axis_tick_font,
+                                     leg.font.size=legend_font, 
+                                     legend.box.scale=2,
+                                     add_color_bars = TRUE,
+                                     show.legend=TRUE) 
+
+perc_plot_mb231 <- plot_perc_nbars_bw(find_perc_nbars(mb231_colors, show_unassigned = FALSE), 
+                                     strip.font.size=facet_font,
+                                     axis.title.font.size = axis_font,
+                                     axis.text.font.size = axis_tick_font,
+                                     leg.font.size=legend_font, 
+                                     legend.box.scale=2,
+                                     add_color_bars = TRUE,
+                                     show.legend=FALSE) 
+
+perc_plot_h1806 <- plot_perc_nbars_bw(find_perc_nbars(h1806_colors, show_unassigned = FALSE),
+                                     strip.font.size=facet_font,
+                                     axis.title.font.size = axis_font,
+                                     axis.text.font.size = axis_tick_font,
+                                     leg.font.size=legend_font, 
+                                     legend.box.scale=2,
+                                     add_color_bars = TRUE,
+                                     show.legend=FALSE) 
+
+clone_plot_mb231 <- plot_clonal_abund(mb231_colors, find_clonal_abund(mb231_colors), 
+                                      add_clone_counts = TRUE, 
+                                        add_color_bars = TRUE,
+                                      clone_count_size = count_size,
+                                       strip.font.size = facet_font,
+                                  axis.title.font.size = axis_font,
+                                   axis.text.font.size = axis_tick_font)
+
+clone_plot_h1806 <- plot_clonal_abund(h1806_colors, find_clonal_abund(h1806_colors), 
+                                      add_clone_counts = TRUE, 
+                                        add_color_bars = TRUE,
+                                      clone_count_size = count_size,
+                                       strip.font.size = facet_font,
+                                  axis.title.font.size = axis_font,
+                                   axis.text.font.size = axis_tick_font)
+
+# perc_plot_mb231
+# perc_plot_h1806
+# clone_plot_mb231
+# clone_plot_h1806
+
+legend <- get_legend(nbars_legend)
+panel_plot <- plot_grid(clone_plot_h1806, perc_plot_h1806, legend, clone_plot_mb231, perc_plot_mb231, legend, 
+                  ncol=6,
+                  rel_widths = c(1, 1, 0.2, 1,1,0.2))
+
+SaveFigure( panel_plot, 'clonal_abund_perc_plots_BOTH'  , 
+            type = "png", width=20, height=5, res=600)
+```
+
+
+
+## Save plots
+```{r}
+plot_width = 5
+plot_height = 4
+
+SaveFigure( perc_plot_mb231 + xlab('Replicate'), 'mb231_perc_nbars_bw'  , 
+            type = "png", width=4.6, height=plot_height, res=600)
+SaveFigure( perc_plot_h1806 + xlab('Replicate'), 'h1806_perc_nbars_bw'  , 
+            type = "png", width=4.6, height=plot_height, res=600)
+
+SaveFigure(clone_plot_mb231 + xlab('Replicate'), 'mb231_clonal_abund', 
+           type = "png", width=plot_width,     height=plot_height, res=600)
+SaveFigure(clone_plot_h1806 + xlab('Replicate'), 'h1806_clonal_abund', 
+           type = "png", width=plot_width,     height=plot_height, res=600)
+```
+
+
+## Calculate Shannon Diversity and Evenness for each sample
+```{r}
+
+abund.mb231 <- find_clonal_abund(mb231)
+abund.h1806 <- find_clonal_abund(h1806)
+
+#Calculate Shannon diversity and evenness
+diversity.mb231 <- abund.mb231 %>% mutate(pLnp = abundance*log(abundance)) %>% ungroup() %>% group_by(condition, replicate) %>% summarize(Shannon = sum(-pLnp), k=length(unique(barpairid))) %>% mutate(Evenness = Shannon/log(k))
+
+diversity.h1806 <- abund.h1806 %>% mutate(pLnp = abundance*log(abundance)) %>% ungroup() %>% group_by(condition, replicate) %>% summarize(Shannon = sum(-pLnp), k=length(unique(barpairid))) %>% mutate(Evenness = Shannon/log(k))
+
+# counts cells per sample
+cellcount.mb231 <- mb231@meta.data %>% group_by(condition,replicate) %>% summarize(cells_postQC=n())
+cellcount.h1806 <- h1806@meta.data %>% group_by(condition,replicate) %>% summarize(cells_postQC=n())
+
+# join metrics
+data_metrics.mb231 <- left_join(diversity.mb231, cellcount.mb231) %>% arrange(factor(condition, levels = c('initial','presort','ctrl','fusion')))
+
+data_metrics.h1806 <- left_join(diversity.h1806, cellcount.h1806) %>% arrange(factor(condition, levels = c('initial','presort','ctrl','fusion')))
+
+
+data_metrics.mb231 %>% select(condition, replicate, cells_postQC, k, Shannon, Evenness) %>% mutate(Shannon = round(Shannon, 2), Evenness = round(Evenness,2))
+data_metrics.h1806 %>% select(condition, replicate, cells_postQC, k, Shannon, Evenness) %>% mutate(Shannon = round(Shannon, 2), Evenness = round(Evenness,2))
+
+mb231@meta.data %>% filter(n_bar_cell >= 1) %>% filter(condition == 'initial') %>% select(barpairid, clone_color) %>% distinct() %>% group_by(clone_color) %>% summarize(count=n())
+
+h1806@meta.data %>% filter(n_bar_cell >= 1) %>% filter(condition == 'initial') %>% select(barpairid, clone_color) %>% distinct() %>% group_by(clone_color) %>% summarize(count=n())
+
+
+
+perc.mb231 <- find_perc_nbars(mb231, show_unassigned = FALSE)
+perc.h1806 <- find_perc_nbars(h1806, show_unassigned = FALSE)
+
+perc.mb231$condition <- factor(perc.mb231$condition, levels=c('initial','presort','ctrl','fusion'))
+perc.h1806$condition <- factor(perc.h1806$condition, levels=c('initial','presort','ctrl','fusion'))
+
+fus_est_mb231 <- perc.mb231 %>% filter(n_bar_cell == 1) %>% mutate(perc_more_than_1 = round(1-abundance,3)) %>% arrange(condition, replicate) %>% select(cellLine, condition, replicate, perc_more_than_1)
+
+
+fus_est_h1806 <- perc.h1806 %>% filter(n_bar_cell == 1) %>% mutate(perc_more_than_1 = round(1-abundance,3)) %>% arrange(condition, replicate) %>% select(cellLine, condition, replicate, perc_more_than_1)
+```
+
+## Compare flow cytometry %mCherry+GFP+ to %fusion cells from scRNA-seq
+```{r}
+# COMPARE FLOW TO % MULTI
+## LOAD FLOW CYTOMETRY DATA SHOWING EXPTECTED % GFP+ mCHERRY+ CELLS FOR EACH SAMPLE
+flow_fusion <- read.csv('data/flow/flowCytometry_percent_gfp-mcherry.csv')
+#flow_fusion$replicate <- as.character(flow_fusion$replicate)
+
+flow_fusion$cellLine[flow_fusion$cellLine=='h1806'] <- 'H1806'
+flow_fusion$cellLine[flow_fusion$cellLine=='mb231'] <- 'MB231'
+
+flow_fusion$replicate <- as.character(flow_fusion$replicate)
+
+compare <- left_join(flow_fusion, rbind(fus_est_mb231, fus_est_h1806))
+
+
+compare$cellLine[compare$cellLine=='H1806'] <- 'HCC1806'
+compare$cellLine[compare$cellLine=='MB231'] <- 'MDA-MB-231'
+
+compare$condition[compare$condition=='ctrl'] <- 'control'
+compare$condition[compare$condition=='fusion'] <- 'fusion-\nenriched'
+compare$condition[compare$condition=='presort'] <- 'pre-sort'
+
+compare$condition <- factor(compare$condition, levels=c('initial','pre-sort','control','fusion-\nenriched'))
+
+
+compare_plot <-
+  ggplot(compare, aes(x=perc_more_than_1, y=perc_fusion_flow, color=cellLine)) +
+  theme_bw() +
+  geom_abline() +
+  ylab('% GFP+mCherry+ by flow cytometry') + xlab('% >1 barcode per cell by scRNAseq') +
+  geom_point(aes(shape=condition, color=cellLine), size=2, alpha=0.8) + 
+  scale_color_manual(values = cellline_colors) +
+  labs(y = expression(paste("% ", GFP^'+', mCherry^'+', ' by flow cytometry')), 
+       x = expression(paste('% > 1 barcode per cell by scRNAseq')),
+   color = 'Population',
+   shape = 'Condition') +
+  theme(aspect.ratio = 1)
+
+SaveFigure( compare_plot, 'flow_vs_multibarcode'  , 
+             type = "png", width=6, height=5, res=600)
+```
+
+
+## Save unique colors to RDS for future recall
+```{r}
+# saveRDS(mb231_colors, './data/rds/mb231_colors_cellclass_hclust_nb-barassigned_ccclustered_precc_singlets.rds')
+# saveRDS(h1806_colors, './data/rds/h1806_colors_cellclass_hclust_nb-barassigned_ccclustered_precc_singlets.rds')
+```
+
+

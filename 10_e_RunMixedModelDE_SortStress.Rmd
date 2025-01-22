@@ -1,0 +1,77 @@
+```{r, show=FALSE, warnings=FALSE}
+library(tidyverse)
+library(Seurat)
+library(wesanderson)
+`%notin%` <- negate(`%in%`)
+source('functions/deFunctions.R')
+```
+
+```{r load and subset data to compare clones before and after cell sorting}
+mb231 <- readRDS('./data/rds/mb231_cellclass_hclust_nb-barassigned_ccclustered_precc_singlets.rds')
+h1806 <- readRDS('./data/rds/h1806_cellclass_hclust_nb-barassigned_ccclustered_precc_singlets.rds')
+```
+
+```{r}
+sort_stressed_clone_subset <- function(obj){
+  # find clones in sorted subset
+  ctrl_clones <- obj@meta.data %>% filter(condition == 'ctrl') %>% 
+    select(barpairid) %>% 
+    drop_na() %>% 
+    pull(barpairid) %>%
+    unique()
+  
+  # only keep clones in sorted subset which were also present in presort
+  keep_clones <- obj@meta.data %>% 
+    filter(condition =='presort') %>% 
+    select(barpairid) %>% 
+    drop_na() %>% 
+    filter(barpairid %in% ctrl_clones) %>% 
+    pull(barpairid) %>% 
+    unique()
+  
+  obj_sub <- subset(obj, 
+                    subset = (barpairid %in% keep_clones) & (condition %in% c('ctrl','presort')))
+  
+  obj_sub@meta.data <- obj_sub@meta.data %>% 
+    mutate(cell_class = case_when(condition %in% c('presort') ~ 'presort', 
+                                  condition %in% c('ctrl') ~ 'sorted'))
+  return(obj_sub)
+}
+  
+h1806_sorted <- sort_stressed_clone_subset(h1806)
+mb231_sorted <- sort_stressed_clone_subset(mb231)
+```
+
+
+```{r}
+# find genes that are differential expressed after cell sorting in control cellls
+h1806_sorted_neb <- run_nebula_de(h1806_sorted, method='LN', min.pct=0.1, n_cores=12, min.cpc=0.01, sid = 'barpairid', group = 'cell_class')
+mb231_sorted_neb <- run_nebula_de(mb231_sorted, method='LN', min.pct=0.1, n_cores=12, min.cpc=0.01, sid = 'barpairid', group = 'cell_class')
+
+write.table(h1806_sorted_neb[[1]], file='outdata/de_results/other/sort_stress/nebula_0.1pct_h1806_control_presort_v_sort.tsv', quote=FALSE, sep='\t', col.names = TRUE)
+write.table(mb231_sorted_neb[[1]], file='outdata/de_results/other/sort_stress/nebula_0.1pct_mb231_control_presort_v_sort.tsv', quote=FALSE, sep='\t', col.names = TRUE)
+```
+
+Identity genes that are upregulated after sorting in controls cells in both cell lines and save the signature
+```{r}
+l2fc_cutoff = 0.2
+pval_cutoff = 0.05
+
+x1 <- h1806_sorted_neb$summary %>% select(gene, p_cell_classsorted, logFC_cell_classsorted) %>% dplyr::rename('avg_logFC'='logFC_cell_classsorted', 'p_val'='p_cell_classsorted') %>% 
+        select(gene, p_val, avg_logFC) %>% mutate(cellline='mb231') %>% arrange(desc(avg_logFC)) %>% 
+        mutate(p_val_adj = p.adjust(p_val, method = "BH")) %>% filter(p_val_adj < pval_cutoff, avg_logFC > l2fc_cutoff) %>% arrange(desc(avg_logFC)) %>% pull(gene)
+
+
+x2 <- mb231_sorted_neb$summary %>% select(gene, p_cell_classsorted, logFC_cell_classsorted) %>% dplyr::rename('avg_logFC'='logFC_cell_classsorted', 'p_val'='p_cell_classsorted') %>% 
+        select(gene, p_val, avg_logFC) %>% mutate(cellline='mb231') %>% arrange(desc(avg_logFC)) %>% 
+        mutate(p_val_adj = p.adjust(p_val, method = "BH")) %>% filter(p_val_adj < pval_cutoff, avg_logFC > l2fc_cutoff) %>% arrange(desc(avg_logFC))  %>% pull(gene)
+
+sort_signature <- intersect(x1, x2)
+
+write.csv(sort_signature,'outdata/de_results/other/sort_stress_signature_genes.csv')
+
+sort_signature <- read.csv('outdata/de_results/other/sort_stress_signature_genes.csv') %>% pull(x) %>% sort()
+
+sort_signature
+```
+

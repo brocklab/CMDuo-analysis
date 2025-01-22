@@ -1,0 +1,151 @@
+```{r}
+suppressWarnings(library(Seurat))
+suppressWarnings(library(tidyverse))
+`%notin%` <- negate(`%in%`)
+```
+
+## Load clustered data with assigned barcode ids
+```{r}
+mb231 <- readRDS('./data/rds/mb231_nb-barassigned_ccclustered_precc_singlets.rds')
+h1806 <- readRDS('./data/rds/h1806_nb-barassigned_ccclustered_precc_singlets.rds')
+```
+
+
+## Inspect distribution of clones in clusters
+If the distribution of clones within 2 or more clusters is highly similar, we will combine these into a metacluster using hierarchical clustering (hclust).
+In this analysis we see that clusters within MDA-MB-231 have unique barcode distributions, however we find highly similar barcode distributions in clusters 0 and 3 in HCC1806. 
+```{r}
+barcode_metaclustering <- function(dat, tree_cut = 200, cellline, dist_method = 'canberra', clust_method = 'complete'){
+  # Calculate percent of each barcoded clone found in each transcriptomic cluster
+  pct_bar_clust <- dat@meta.data %>% select(barpairid, seurat_clusters) %>% drop_na() %>%  
+    group_by(barpairid, seurat_clusters) %>% 
+    mutate(n_bar_in_cluster=n()) %>% distinct() %>% ungroup() %>% 
+    group_by(barpairid) %>% 
+    mutate(total_bar_count = sum(n_bar_in_cluster)) %>% filter(total_bar_count >= 10) %>% 
+    mutate(pct_bar_in_clust = n_bar_in_cluster/total_bar_count) 
+  
+  # Format data for hierarchical clustering
+  clust_bar_df <- pct_bar_clust %>% select(barpairid, seurat_clusters, pct_bar_in_clust) %>% arrange(seurat_clusters) %>% mutate(cluster=paste0('clust_',seurat_clusters)) %>% select(-seurat_clusters) %>% pivot_wider(names_from = cluster, values_from = pct_bar_in_clust)
+  clust_bar_df <- clust_bar_df[is.na(clust_bar_df$barpairid)==FALSE,]
+  clust_bar_df[is.na(clust_bar_df)] <- 0
+  clust_bar_mat <- clust_bar_df %>% column_to_rownames('barpairid') %>% as.matrix()
+  clust_bar_mat_t <- t(clust_bar_mat)
+  
+  # Compute distance matrix of similarity of barcode distributions
+  distance_mat <- dist(clust_bar_mat_t, method = dist_method) 
+  
+  # Perform ierarchical clustering
+  set.seed(123)  # Setting seed
+  Hierar_cl <- hclust(distance_mat, method = clust_method)
+  Hierar_cl
+  
+  # Plot tree and make sure cut looks approrpiate 
+  fit <- cutree(Hierar_cl, h = tree_cut)
+  make_cut <- plot(as.dendrogram(Hierar_cl), ylim = c(0,400), main=paste0(cellline, ' barcode metaclustering'))
+  make_cut
+  abline(h = tree_cut, col = "red")
+  
+  # format hclust outputs for appending to Seurat object
+  hclust_outs <- data.frame(fit) %>% rownames_to_column('cluster') %>% dplyr::rename('hclust'='fit')
+  
+  test <- dat
+  test@meta.data <- left_join(dat@meta.data %>% mutate(cluster=paste0('clust_',seurat_clusters)) %>% rownames_to_column('cellid'), hclust_outs) %>% 
+    select(-cluster) %>% column_to_rownames('cellid')
+  
+  # inspect heatmap of results
+  hm <- heatmap(clust_bar_mat, Colv = as.dendrogram(Hierar_cl))
+  hm
+  title(main=paste0(cellline), adj = 0)
+  
+  dp1 <- DimPlot(test, reduction = "umap", group.by = "seurat_clusters") + 
+    ggtitle(paste0(cellline,' seurat_clusters (before)')) + 
+    theme_void() + coord_fixed() + theme(aspect.ratio = 0.8)
+  
+  dp2 <- DimPlot(test, reduction = "umap", group.by = "hclust") + 
+    ggtitle(paste0(cellline,' hclust (after)')) + 
+    theme_void() + coord_fixed() + theme(aspect.ratio = 0.8)
+  # dp3 <- DimPlot(test, reduction = "umap", group.by = "condition") + scale_color_manual(values=c('dodgerblue','goldenrod','black','grey80')) + ggtitle(paste0(cellline,' condition')) + theme_void() + coord_fixed() + theme(aspect.ratio = 0.8)
+  dp4 <- DimPlot(test, reduction = "umap", group.by = "Phase") + 
+    ggtitle(paste0(cellline,' cell cycle phase')) + 
+    theme_void() + coord_fixed() + theme(aspect.ratio = 0.8)
+  print(dp1)
+  print(dp2)
+  # print(dp3)
+  print(dp4)
+  return(list(test, dp1, dp2, clust_bar_mat, Hierar_cl, make_cut))
+}
+
+bc_clust_mb231 <- barcode_metaclustering(mb231, tree_cut = 200, cellline='MDA-MB-231', dist_method = 'canberra', clust_method = 'complete')
+mb231_metaclustered <- bc_clust_mb231[[1]]
+
+bc_clust_h1806 <- barcode_metaclustering(h1806, tree_cut = 200, cellline='HCC1806'   , dist_method = 'canberra', clust_method = 'complete')
+h1806_metaclustered <- bc_clust_h1806[[1]]
+```
+
+## Save figures for barcode informed clustering
+```{r}
+### save figure function
+fig_path <- "./plots/barcode_informed_clustering/"
+
+SaveFigure <- function(plots, name, type = "png", width, height, res){
+  if(type == "png") {png(paste0(fig_path, name, ".", type),width = width, height = height, units = "in", res = res)} 
+  else {pdf(paste0(fig_path, name, ".", type),width = width, height = height)}
+  print(plots)
+  dev.off()
+}
+
+
+
+plot(as.dendrogram(bc_clust_mb231[[5]]), ylim = c(0,400), main=paste0('MDA-MB-231 barcode metaclustering'))
+abline(h = 200, col = "red")
+mb_cut <- recordPlot()
+
+plot(as.dendrogram(bc_clust_h1806[[5]]), ylim = c(0,400), main=paste0('HCC1806 barcode metaclustering'))
+abline(h = 200, col = "red")
+hc_cut <- recordPlot()
+
+
+SaveFigure(bc_clust_mb231[[2]], 'mb231_pre_correction', type = "png", width=5, height=3, res=300)
+SaveFigure(bc_clust_mb231[[3]], 'mb231_post_correction', type = "png", width=5, height=3, res=300)
+SaveFigure(heatmap(bc_clust_mb231[[4]], Colv = as.dendrogram(bc_clust_mb231[[5]])), 'mb231_barcode_heatmap', type = "png", width=5, height=5, res=300)
+SaveFigure(mb_cut, 'mb231_tree_cut', type = "png", width=5, height=3, res=300)
+
+SaveFigure(bc_clust_h1806[[2]], 'h1806_pre_correction', type = "png", width=5, height=3, res=300)
+SaveFigure(bc_clust_h1806[[3]], 'h1806_post_correction', type = "png", width=5, height=3, res=300)
+SaveFigure(heatmap(bc_clust_h1806[[4]], Colv = as.dendrogram(bc_clust_h1806[[5]])), 'h1806_barcode_heatmap', type = "png", width=5, height=5, res=300)
+SaveFigure(hc_cut, 'h1806_tree_cut', type = "png", width=5, height=3, res=300)
+```
+
+
+
+
+## Save Seurat objects with filtered ClonMapper barcode annotations
+```{r}
+# create alpha labels and make fusion dominant cluster "F" in each cell line for ease of interpretation
+h1806_alpha_labels = data.frame(clust = c('A','B','C','D','F','E','G'), hclust = seq(1,7))
+mb231_alpha_labels = data.frame(clust = c('A','D','B','F','C','E','G'), hclust = seq(1,7))
+
+mb231_metaclustered@meta.data  <- left_join(mb231_metaclustered@meta.data %>% rownames_to_column('cellid'), mb231_alpha_labels) %>% column_to_rownames('cellid')
+
+h1806_metaclustered@meta.data  <- left_join(h1806_metaclustered@meta.data %>% rownames_to_column('cellid'), h1806_alpha_labels) %>% column_to_rownames('cellid')
+
+mb231_metaclustered@meta.data$clust <- factor(mb231_metaclustered@meta.data$clust, levels=LETTERS[1:7])
+h1806_metaclustered@meta.data$clust <- factor(h1806_metaclustered@meta.data$clust, levels=LETTERS[1:7])
+
+Idents(mb231_metaclustered) <- "clust"
+Idents(h1806_metaclustered) <- "clust"
+
+DimPlot(mb231_metaclustered)
+DimPlot(h1806_metaclustered)
+
+# saveRDS(mb231_metaclustered, './data/rds/mb231_hclust_cellclass_nb-barassigned_ccclustered_precc_singlets.rds')
+# saveRDS(h1806_metaclustered, './data/rds/h1806_hclust_cellclass_nb-barassigned_ccclustered_precc_singlets.rds')
+```
+
+
+```{r}
+sessionInfo()
+```
+
+
+

@@ -1,0 +1,239 @@
+```{r, show=FALSE, warning=FALSE, quiet=TRUE}
+library(tidyverse)
+library(Seurat)
+library(cowplot)
+`%notin%` <- negate(`%in%`)
+source('functions/color_mapping.R')
+source('functions/ParentProgenyUMAPs_DE_functions.R')
+source('functions/ggumap.R')
+fig_path <- "./plots/parent_progeny_eachClone_analysis/"
+```
+
+```{r load data}
+mb231 <- readRDS('./data/rds/mb231_colors_cellclass_hclust_nb-barassigned_ccclustered_precc_singlets.rds')
+mb231_markers <- read.csv('outdata/clusters/metacluster_markergenes_mb231.tsv',sep='\t')
+
+h1806 <- readRDS('./data/rds/h1806_colors_cellclass_hclust_nb-barassigned_ccclustered_precc_singlets.rds')
+h1806_markers <- read.csv('outdata/clusters/metacluster_markergenes_h1806.tsv',sep='\t')
+```
+
+For each parent-parent-fusion set, want to identify marker genes of each parent and then marker genes of fusion clones versus parent
+Will define a marker gene as something that is present in >= 75% of cells within that clonal lineage
+Will only look at clones with at least `cell_min` cells per population in a fusion set
+```{r}
+cellline='mb231'
+
+if(cellline=='h1806'){
+  obj <- h1806
+  markers_full <- h1806_markers
+}
+
+if(cellline=='mb231'){
+  obj <- mb231
+  markers_full <- mb231_markers
+}
+
+
+#### Create seurat object subset containing only fusion trios (parent-parent-fusion) with at least cell_min cells each
+obj_trio_min <- subset_fusion_trios_min_cell(obj, parent_conds = c('initial'), cell_min=20)
+
+# scale data on all features
+obj_trio_min@assays$RNA$scale.data <- NULL 
+obj_trio_min <- ScaleData(obj_trio_min, features = rownames(obj_trio_min))
+
+fusepairs <- obj_trio_min@meta.data %>%
+  filter(fusion=='fusion') %>%
+  select(gbarid, rbarid, barpairid) %>% 
+  arrange(gbarid) %>% 
+  distinct() %>% remove_rownames()
+```
+
+
+
+
+For every fusion set, find parent and fusion marker genes. Store outputs
+
+```{r}
+source('functions/find_marker_genes_ppf_lowhi.R')
+
+#bc_markers <- find_marker_genes_ppf_lowhi(obj_trio_min, fusepairs, n_genes=100, min.pct=0.8)
+
+#write.table(bc_markers, file=paste0('outdata/de_clonal_parent_progeny_markers/',cellline,'_parent_progeny_barcode_markers_nf'), quote=FALSE, sep='\t', col.names = TRUE)
+
+bc_markers <- read.csv(paste0('outdata/de_clonal_parent_progeny_markers/',cellline,'_parent_progeny_barcode_markers_nf'),sep='\t') %>% remove_rownames
+```
+
+
+
+```{r}
+source('functions/plot_barcode_marker_genes.R')
+source('functions/plot_cluster_marker_genes.R')
+
+scale = 1
+
+bc_plots <- plot_barcode_marker_genes(obj_trio_min,
+                                      fusepairs,
+                                      include_fusion_markers = TRUE,
+                                      include_control_markers = FALSE,
+                                      heatmap_color_low = 'grey99',
+                                      heatmap_color_mid = 'grey85',
+                                      heatmap_color_hi = 'grey20',
+                                      n_genes = 15,
+                                      markergenes_df = bc_markers,
+                                      max_cell_per_clone_plot = 100,
+                                      minmax_scale = TRUE,
+                                      scale_exp_min = -scale,
+                                      scale_exp_max = scale,
+                                      scale_exp_min_sc = -scale,
+                                      scale_exp_max_sc = scale,
+                                      min_counts = 20,
+                                      title_size = 10,
+                                      xlabel_size = 8,
+                                      ylabel_size = 6
+                                      )
+# #
+cl_plots <- plot_cluster_marker_genes(obj_trio_min,
+                                      fusepairs,
+                                      markers_full = markers_full,
+                                      n_genes = 6,
+                                      max_cell_per_clone_plot = 100,
+                                      minmax_scale = TRUE,
+                                      scale_exp_min = -scale,
+                                      scale_exp_max = scale,
+                                      scale_exp_min_sc = -scale,
+                                      scale_exp_max_sc = scale,
+                                      min_counts = 20,
+                                      title_size = 10,
+                                      xlabel_size = 8,
+                                      ylabel_size = 6,
+                                      heatmap_color_low = 'grey99',
+                                      heatmap_color_mid = 'grey85',
+                                      heatmap_color_hi = 'grey20'
+                                      )
+
+
+
+bc_plots[[1]][1]
+bc_plots[[3]][1]
+```
+
+```{r}
+# save single-cell heatmaps for barcode markers
+for(i in 1:nrow(fusepairs)){
+ fig <-  bc_plots[[1]][i][[1]]
+ SaveFigure(fig, paste0(cellline,'_',fusepairs$barpairid[i],'_barcode_dot_summary'), width=2, height=4.3, res=600)
+}
+
+# save single-cell heatmaps for cluster markers
+for(i in 1:nrow(fusepairs)){
+ fig <-  cl_plots[[1]][i][[1]]
+ SaveFigure(fig, paste0(cellline,'_',fusepairs$barpairid[i],'_cluster_dot_summary'), width=2, height=4.3, res=600)
+}
+
+
+# save single-cell heatmaps for barcode markers
+for(i in 1:nrow(fusepairs)){
+ fig <-  bc_plots[[3]][i][[1]]
+ SaveFigure(fig, paste0(cellline,'_',fusepairs$barpairid[i],'_barcode_heatmap'), width=6, height=4.3, res=600)
+}
+
+# save single-cell heatmaps for cluster markers
+for(i in 1:nrow(fusepairs)){
+ fig <-  cl_plots[[2]][i][[1]]
+ SaveFigure(fig, paste0(cellline,'_',fusepairs$barpairid[i],'_cluster_heatmap'), width=6, height=4.3, res=600)
+}
+```
+
+
+```{r save cluster plots}
+library(cowplot)
+
+leg <- get_legend(cl_plots[[3]])
+
+pl <- cl_plots[[1]]
+iter <- 1+nrow(fusepairs)
+pl[[iter]] <- leg
+               
+
+pc <- plot_grid(plotlist = pl, ncol = 7)
+
+
+if(cellline=='h1806'){
+  SaveFigure(pc, paste0(cellline,'_parent_progeny_cluster_markers_full_page'), width=13, height=17, res=600)
+}
+
+if(cellline=='mb231'){
+  SaveFigure(pc, paste0(cellline,'_parent_progeny_cluster_markers_full_page'), width=13, height=17/2, res=600)
+}
+```
+
+```{r save lineage plots}
+leg <- get_legend(bc_plots[[2]])
+hm_leg <- get_legend(bc_plots[[4]])
+
+pl <- bc_plots[[1]]
+iter <- 1+nrow(fusepairs)
+pl[[iter]] <- leg
+               
+
+pb <- plot_grid(plotlist = pl, ncol = 7)
+
+if(cellline=='h1806'){
+  SaveFigure(pb, paste0(cellline,'_parent_progeny_barcode_markers_full_page'), width=13, height=17, res=600)
+}
+
+if(cellline=='mb231'){
+  SaveFigure(pb, paste0(cellline,'_parent_progeny_barcode_markers_full_page'), width=13, height=17/2, res=600)
+}
+```
+
+
+```{r}
+if(cellline=='h1806'){
+  fusepairs <- fusepairs %>% mutate(group = 1:n())
+  
+  focus_sets <- fusepairs #%>% filter(group %in% c(2,6,8,18,20,22)) 
+  
+  sc_clust <- cl_plots[[2]]
+  sc_clone <- bc_plots[[3]]
+  bulk_clust <- cl_plots[[1]]
+  bulk_clone <- bc_plots[[1]]
+  
+  for(i in 1:nrow(fusepairs)){
+  sc_clust_plot <- sc_clust[focus_sets$group[i]]
+  sc_clone_plot <- sc_clone[focus_sets$group[i]]
+  bulk_clust_plot <- bulk_clust[focus_sets$group[i]]
+  bulk_clone_plot <- bulk_clone[focus_sets$group[i]]
+  
+  bulk_combined <-  plot_grid(plotlist = c(bulk_clust_plot, bulk_clone_plot), ncol=2)
+  
+  SaveFigure(bulk_combined, paste0(cellline,'_',focus_sets$barpairid[i],'_dot_plots_combined'), width=3.5, height=4.3, res=600)
+  }
+  
+  SaveFigure(plot_grid(hm_leg), 'legend_hm', width=1, height=4.3, res=600)
+  SaveFigure(plot_grid(leg), 'legend', width=1, height=4.3, res=600)
+}
+```
+
+
+```{r save umaps}
+#source('functions/ParentProgenyUMAPs_DE_functions.R')
+fig_path <- "./plots/parent_progeny_barcode_markers_all/"
+
+for(gbar in unique(fusepairs$gbarid)){
+  plot_ppf_trios(obj=h1806, 
+                 subset_obj = obj_trio_min, 
+                 pick_clone=gbar, 
+                 legend.pos = 'top', 
+                 legend.title = '')
+}
+
+for(rbar in unique(fusepairs$rbarid)){
+  plot_ppf_trios(obj=h1806, 
+                 subset_obj = obj_trio_min, 
+                 pick_clone=rbar, 
+                 save_fig = T,
+                 legend.pos = 'top', 
+                 legend.title = '')
+}
+```

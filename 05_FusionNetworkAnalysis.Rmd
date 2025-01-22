@@ -1,0 +1,114 @@
+```{r}
+suppressWarnings(library(Seurat))
+suppressWarnings(library(tidyverse))
+suppressWarnings(library(igraph))
+suppressWarnings(library(scales))
+source('functions/networkPlots.R')
+source('functions/color_mapping.R')
+`%notin%` <- negate(`%in%`)
+fig_path <- "./plots/network/"
+```
+
+
+## Load clustered data with assigned barcode ids
+```{r}
+mb231 <- readRDS('./data/rds/mb231_hclust_nb-barassigned_ccclustered_precc_singlets.rds')
+h1806 <- readRDS('./data/rds/h1806_hclust_nb-barassigned_ccclustered_precc_singlets.rds')
+
+h1806@meta.data$replicate[is.na(h1806@meta.data$replicate)==TRUE] <- '0'
+mb231@meta.data$replicate[is.na(mb231@meta.data$replicate)==TRUE] <- '0'
+```
+
+## Choose the minimum number of fusion cells represented per clone per replicate required per replicate for classification
+```{r}
+min_fusion_clone_cells_per_rep = 5
+```
+
+
+## Create network representation of fusion events in the population
+```{r, warning=FALSE, quiet=TRUE}
+net_h1806 <- layout_network(obj = h1806, 
+                       cellline = 'h1806', 
+      min_cell_per_fusion_clone = min_fusion_clone_cells_per_rep, 
+             min_cell_per_clone = 1, 
+                    layout_type = 'nicely', 
+                   plot_scaling = 10)
+
+net_mb231 <- layout_network(obj = mb231, 
+                       cellline = 'mb231', 
+      min_cell_per_fusion_clone = min_fusion_clone_cells_per_rep, 
+             min_cell_per_clone = 1, 
+                    layout_type = 'nicely', 
+                   plot_scaling = 10)
+
+h1806_plots <- make_all_plots(net_h1806[[1]], cellline='HCC1806'   , scale='none')
+mb231_plots <- make_all_plots(net_mb231[[1]], cellline='MDA-MB-231', scale='none')
+ 
+h1806_plots
+mb231_plots
+```
+
+# Save figures
+```{r}
+width = 5
+height = width
+res = 600
+
+cellline = 'h1806'
+SaveFigure(h1806_plots[[1]], paste0(cellline,'_constellation')      , type = "png", width, height, res)
+SaveFigure(h1806_plots[[2]], paste0(cellline,'_network_replicate_1'), type = "png", width, height, res)
+SaveFigure(h1806_plots[[3]], paste0(cellline,'_network_replicate_2'), type = "png", width, height, res)
+SaveFigure(h1806_plots[[4]], paste0(cellline,'_network_replicate_3'), type = "png", width, height, res)
+SaveFigure(h1806_plots[[5]], paste0(cellline,'_network_replicate_4'), type = "png", width, height, res)
+SaveFigure(h1806_plots[[6]], paste0(cellline,'_network_all')        , type = "png", width, height, res)
+
+cellline = 'mb231'
+SaveFigure(mb231_plots[[1]], paste0(cellline,'_constellation')      , type = "png", width, height, res)
+SaveFigure(mb231_plots[[2]], paste0(cellline,'_network_replicate_1'), type = "png", width, height, res)
+SaveFigure(mb231_plots[[3]], paste0(cellline,'_network_replicate_2'), type = "png", width, height, res)
+SaveFigure(mb231_plots[[4]], paste0(cellline,'_network_replicate_3'), type = "png", width, height, res)
+SaveFigure(mb231_plots[[5]], paste0(cellline,'_network_replicate_4'), type = "png", width, height, res)
+SaveFigure(mb231_plots[[6]], paste0(cellline,'_network_all')        , type = "png", width, height, res)
+```
+
+
+# Classify fusion cells and the number of fusion events each fusion parent is invovled in and add this to meta data
+```{r}
+h1806_classified <- classify_cells_fusion_and_parent(h1806, min_fusion_clone_cells_per_rep = min_fusion_clone_cells_per_rep)
+mb231_classified <- classify_cells_fusion_and_parent(mb231, min_fusion_clone_cells_per_rep = min_fusion_clone_cells_per_rep)
+```
+
+# Save classifed Seurat objects
+```{r}
+# saveRDS(mb231_classified, './data/rds/mb231_cellclass_hclust_nb-barassigned_ccclustered_precc_singlets.rds')
+# saveRDS(h1806_classified, './data/rds/h1806_cellclass_hclust_nb-barassigned_ccclustered_precc_singlets.rds')
+```
+
+# Plot number of fusion partners
+```{r}
+source('functions/n_fusion_partners_plots.R')
+
+partners_summary_plot <- n_fusion_partners_plot(h1806_classified, mb231_classified, 
+                                                x.text.size = 10, 
+                                                y.text.size=10, 
+                                                label.font.size=3)
+
+SaveFigure(partners_summary_plot, paste0('n_fusion_partners_plot'), type = "png", width=7, height=4, res=600)
+```
+
+
+```{r}
+source('functions/n_fusion_partners_plots.R')
+mb_binom <- binom_test_n_partners(mb231_classified, pcut = 0.05, label.font.size=3.5, x.text.size=12, y.text.size=12, vertical=FALSE)
+hc_binom <- binom_test_n_partners(h1806_classified, pcut = 0.05, label.font.size=3.5, x.text.size=12, y.text.size=12, vertical=FALSE)
+
+
+mb_binom[[1]]
+hc_binom[[1]]
+SaveFigure(mb_binom[[1]], paste0('n_fusion_partners_plot_binom_mb231'), type = "png", width=5, height=6, res=600)
+SaveFigure(hc_binom[[1]], paste0('n_fusion_partners_plot_binom_h1806'), type = "png", width=5, height=6, res=600)
+```
+
+```{r}
+sessionInfo()
+```

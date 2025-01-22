@@ -1,0 +1,150 @@
+---
+title: "00_SeuratSetupAndQC"
+author: "Andrea Gardner"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(Seurat)
+library(scDblFinder)
+library(BiocParallel)
+library(stringr)
+`%notin%` <- negate(`%in%`)
+```
+
+#ClonMapper Duo: Seurat Object setup
+
+## Introduction
+This notebook details all of the steps of standard QC steps to prepare raw data for downstream analysis
+
+
+## Load in whole transcriptome data from Parse WT outputs
+The Parse pipeline outputs two matrix files, one in "DGE_filtered" and one in "DGE_unfiltered". The filtered data applies a minimum transcript count. As we intend to apply our own QC cutoffs, we will start with the unfiltered outputs.
+
+```{r import unfiltered data and create Seurat object}
+# set path to WT pipeline outputs
+path_to_WT_outs <- '../parsealign/aligned/combined_WT/all-sample/DGE_unfiltered'
+
+# create matrix from data using built-in Seurat function for Parse structured data. 
+# Note: This step can be slow.
+mat <- ReadParseBio(path_to_WT_outs)
+
+# check to see if empty gene names are present, add name if empty.
+table(rownames(mat) == "")
+rownames(mat)[rownames(mat) == ""] <- "unknown"
+
+# read in cell meta data from WT
+cellmeta_wt <- read.csv(paste0(path_to_WT_outs, "/cell_metadata.csv"), row.names = 1)
+
+# create Seurat object with minimal filters
+dat_raw <- CreateSeuratObject(mat, 
+                          min.features = 500, 
+                          min.cells = 100, 
+                          names.field = 0, 
+                          meta.data = cellmeta_wt)
+
+dat <- dat_raw
+
+# extract cell line, replicate, and condition information from "sample" name
+dat@meta.data <- dat@meta.data %>% 
+  mutate(cellLine=str_extract(sample, "^[^_]+"), 
+         replicate = str_extract(sample, "(?<=_)[0-9]+(?=_)"),
+         condition = str_extract(sample, "(?<=_)[^_]+$")) %>% 
+  mutate(cellid = rownames(.))
+
+# set identity to cell line
+dat$orig.ident <- dat@meta.data$cellLine
+Idents(dat) <- dat$orig.ident
+
+## save unfiltered object
+#saveRDS(dat, './data/rds/seurat_dat_full_unfiltered.rds')
+```
+
+
+## Quality control filtering
+
+First inspect unfiltered data
+```{r QC unfiltered}
+dat <- readRDS('./data/rds/seurat_dat_full_unfiltered.rds')
+
+# add a column with calculated percent mitochrondrial DNA for each cell
+dat[["percent_mt"]] <- PercentageFeatureSet(dat, pattern = "^MT-")
+
+# plot QC metrics
+VlnPlot(dat, pt.size = 0.10, alpha=0.05, features = c("nFeature_RNA", "nCount_RNA", "percent_mt"), ncol = 3)
+FeatureScatter(dat, feature1 = "nCount_RNA", feature2 = "percent_mt")
+FeatureScatter(dat, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+```
+
+Above, we see that in both cell lines, there is a grouping of "cells" with very few features. We will first apply broad filters and then reinspect the data.
+```{r}
+dat_qc1 <- subset(dat, subset = percent_mt < 22 & nCount_RNA < 1e5 & nFeature_RNA > 500)
+dat_qc1 <- subset(dat, subset = percent_mt < 22 & nCount_RNA < 1e5 & nFeature_RNA > 500)
+
+VlnPlot(dat_qc1, pt.size = 0.10, alpha=0.05, features = c("nFeature_RNA", "nCount_RNA", "percent_mt"), ncol = 3)
+FeatureScatter(dat_qc1, feature1 = "nCount_RNA", feature2 = "percent_mt")
+FeatureScatter(dat_qc1, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+
+
+VlnPlot(dat_qc1, pt.size = 0.10, alpha=0.05, features = c("nFeature_RNA", "nCount_RNA", "percent_mt"), ncol = 3, group.by = 'condition')
+```
+
+Now, being a little more strict
+```{r}
+dat_qc2 <- subset(dat_qc1, subset = percent_mt < 18 & nCount_RNA < 5e4 & nFeature_RNA > 800)
+VlnPlot(dat_qc2, pt.size = 0.10, alpha=0.05, features = c("nFeature_RNA", "nCount_RNA", "percent_mt"), ncol = 3)
+FeatureScatter(dat_qc2, feature1 = "nCount_RNA", feature2 = "percent_mt")
+FeatureScatter(dat_qc2, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+
+VlnPlot(dat_qc2, pt.size = 0.10, alpha=0.05, features = c("nFeature_RNA", "nCount_RNA", "percent_mt"), ncol = 3, group.by = 'condition')
+```
+
+We see in both cell lines, there are some cells with very few RNA counts, will filter those out
+```{r}
+dat_qc3 <- subset(dat_qc2, subset = percent_mt > 2 & nCount_RNA > 1500)
+VlnPlot(dat_qc3, pt.size = 0.10, alpha=0.05, features = c("nFeature_RNA", "nCount_RNA", "percent_mt"), ncol = 3)
+FeatureScatter(dat_qc3, feature1 = "nCount_RNA", feature2 = "percent_mt")
+FeatureScatter(dat_qc3, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+
+VlnPlot(dat_qc3, pt.size = 0.10, alpha=0.05, features = c("nFeature_RNA", "nCount_RNA", "percent_mt"), ncol = 3, group.by = 'condition')
+```
+
+
+## Assign doublets with scDblFinder.
+Filtered data looks good. Now, in attempt distinguish doublets from fusion cells, we will run scDblFinder. 
+```{r}
+# convert to single cell experiment
+sc.dat <- as.SingleCellExperiment(dat_qc3)
+
+# run scDblFinder
+sce <- scDblFinder(sc.dat, samples="sample", BPPARAM=MulticoreParam(3))
+table(sce$scDblFinder.class)
+
+# summarize results
+#scdbl <- data.frame(sce@colData) %>% select(cellid, scDblFinder.class, scDblFinder.score, scDblFinder.weighted, scDblFinder.cxds_score)
+scdbl <- sce@colData[,c('cellid','scDblFinder.class', 'scDblFinder.score', 'scDblFinder.weighted', 'scDblFinder.cxds_score')] %>% data.frame()
+
+# # save scDblFinder output as tsv
+write.table(scdbl, file='outdata/scDbl_scores_dat_qc3.tsv', quote=FALSE, sep='\t', col.names = TRUE)
+```
+
+Will add the results of scDblfinder to our Seurat object, and then save
+```{r}
+dat_qc3_scdbl <- dat_qc3
+
+dat_qc3_scdbl@meta.data <- left_join(
+  dat_qc3_scdbl@meta.data, 
+  scdbl, by='cellid') %>% column_to_rownames('cellid')
+
+# # save doublet annotated object
+ saveRDS(dat_qc3_scdbl, './data/rds/seurat_obj_dat_qc3_scdbl.rds')
+```
+
+
+```{r}
+sessionInfo()
+```
+

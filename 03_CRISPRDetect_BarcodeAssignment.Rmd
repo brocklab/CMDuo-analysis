@@ -1,0 +1,377 @@
+---
+title: "guide_assignment"
+output: html_document
+date: "2024-08-28"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+suppressWarnings(library(tidyverse))
+suppressWarnings(library(Seurat))
+suppressWarnings(library(wesanderson))
+options(dplyr.summarise.inform = FALSE)
+
+`%notin%` <- negate(`%in%`)
+```
+
+Will take in unfiltered PARSE guide assignments and perform manual filtering
+```{r}
+path_to_cr_outs <- '../parsealign/aligned/combined_CR/all-sample/guide_RNAs_unfiltered'
+
+ReadParseBio_crispr <- function(data.dir, ...) {
+  file.dir <- list.files(path = data.dir, pattern = ".mtx")
+  mtx <- file.path(data.dir, file.dir)
+  cells <- file.path(data.dir, "cell_metadata.csv")
+  features <- file.path(data.dir, "all_guides.csv") 
+  return(ReadMtx(
+    mtx = mtx,
+    cells = cells,
+    features = features,
+    cell.column = 1,
+    feature.column = 2,
+    cell.sep = ",",
+    feature.sep = ",",
+    skip.cell = 1,
+    skip.feature = 1,
+    mtx.transpose = TRUE
+  ))
+}
+
+gmat <- ReadParseBio_crispr(path_to_cr_outs)
+
+# check to see if empty gene names are present, add name if empty.
+table(rownames(gmat) == "")
+rownames(gmat)[rownames(gmat) == ""] <- "unknown"
+
+# Subset the matrix to include only non-empty columns and rows 
+gmat_c <- gmat[rowSums(gmat) != 0, colSums(gmat) != 0]
+```
+
+
+## Load data
+```{r}
+## LOAD SEURAT OBJECTS
+dat_mb231 <- readRDS('./data/rds/mb231_ccclustered_precc_singlets.rds')
+dat_h1806 <- readRDS('./data/rds/h1806_ccclustered_precc_singlets.rds')
+
+## LOAD PARASE FORMATTED BARCODE/gRNA META DATA
+# get gRNA meta data
+features <- read_csv(paste0(path_to_cr_outs, "/all_guides.csv")) %>% dplyr::select(gene_id, gene_name)
+features <- features %>% mutate(name = gene_name) %>% separate(name, sep="_", into=c('barid','pycash_cellLine'))
+
+## ADD COLOR INFORMATION TO EACH CELL IN SEURAT METADATA
+  # Add barcode color information to barcode meta
+  features <- features %>%
+    mutate(color = case_when(startsWith(barid,'g')==TRUE ~ "gfp",
+                             startsWith(barid,'r')==TRUE ~ "mch",
+                             .default="undetermined"))
+  
+  # Function to add cell color data from expression to metadata
+  exp_color_add <- function(dat){
+    color_expression <- FetchData(dat, vars = c('EGFP','MCHERRY'),)
+  
+    color_expression <- color_expression %>% 
+      mutate(exp_color = case_when(EGFP  > 0.1 & MCHERRY  > 0.1 ~ 'gfp_mch',
+                                   EGFP <= 0.1 & MCHERRY  > 0.1 ~ 'mch',
+                                   EGFP  > 0.1 & MCHERRY <= 0.1 ~ 'gfp', .default = 'nd'))
+  
+    dat <- AddMetaData(dat, metadata = color_expression)
+    return(dat)
+  }
+  
+  # Add cell color expression data to Seurat meta
+  dat_mb231 <- exp_color_add(dat_mb231)
+  dat_h1806 <- exp_color_add(dat_h1806)
+
+## LOAD FLOW CYTOMETRY DATA SHOWING EXPTECTED % GFP+ mCHERRY+ CELLS FOR EACH SAMPLE
+flow_fusion <- read.csv('data/flow/flowCytometry_percent_gfp-mcherry.csv')
+flow_fusion$replicate <- as.character(flow_fusion$replicate)
+```
+
+
+## Filter and assign bacodes manually
+Barcodes will be assigned to each cell using a probabilistic model which accounts for sequencing noise in the data. Assigned barcodes will first be filtered to have a minimum number of reads for each barcode within a cell (`min_guideReads_perCell`), to match the expected cell line, and to ensure that each detected barcode is present in at least 2 cells across all samples within the chosen data set. After this minimal filtering, the expected noise generated from each barcode will be calculated based on overall barcode abundance in the population and the number of reads per cell. A negative binomial model will be used to determine the probability that a barcode within a cell is noise. Barcodes with a p-adjusted value < 0.05 will be assigned as true barcodes, other barcodes will be filtered out. Once barcodes are assigned, clone color (gfp, mcherry, or gfp_mcherry) will be determined by presence of 'g' and/or 'r' in the assigned barcode name.
+
+Make objective function to try to match the number of % fusion cells observed by flow while preserving the highest number of barcoded clones
+```{r barcode assignment function}
+library(MASS)
+library(dplyr)
+
+optim_bc_parameters_nb <- function(dat_use = dat_mb231,
+                                   cellline = 'mb231',
+                                   min_guideReads_perCell = 3,
+                                   min_clone_per_rep = 3,
+                                   p_cut = 0.05
+                                   )
+  {
+  # get meta data for cells from Seurat object
+  meta <- dat_use@meta.data %>% rownames_to_column('cellid') %>% 
+    mutate(replicate = replace_na(replicate, '0'))
+  
+  # only analyze guides for cells in the chosen data subset and keep non-empty columns and rows 
+  gmat_in_dat <- gmat_c[,colnames(gmat_c) %in% meta$cellid]
+  gmat_in_dat <- gmat_in_dat[rowSums(gmat_in_dat) != 0, colSums(gmat_in_dat) != 0]
+  
+  ####### PRE-FILTER DATA
+    # require a minimum number of reads per guide in each cell and keep only non-empty columns and rows 
+    gmat_in_dat[gmat_in_dat <= min_guideReads_perCell] <- 0                                           ############# PARAMETER = min_guideReads_perCell
+    gmat_in_dat <- gmat_in_dat[rowSums(gmat_in_dat) != 0, colSums(gmat_in_dat) != 0]
+    
+    # to filter out noisy barcodes, require each barcode to occur in at least 2 unique cells
+    # and have been assigned to the targeted cell line (known from targeted barcode sequencing)
+    keep_guides <- names(rowSums(gmat_in_dat != 0)[rowSums(gmat_in_dat != 0) >= 2]) 
+    keep_guides <- keep_guides[keep_guides %in% features$gene_id[features$pycash_cellLine==cellline]] 
+    gmat_in_dat <- gmat_in_dat[rownames(gmat_in_dat) %in% keep_guides,]
+    gmat_in_dat <- gmat_in_dat[rowSums(gmat_in_dat) != 0, colSums(gmat_in_dat) != 0]
+    
+    # Convert matrix to data frame, make long, and remove guides with 0 counts
+    long_counts <- data.frame(gmat_in_dat) %>% 
+      rownames_to_column('gene_id') %>% 
+      pivot_longer(-gene_id, names_to = 'cellid', values_to = 'guide_counts') %>% 
+      filter(guide_counts > 0) %>% 
+      mutate(cellid = gsub("^X", "", cellid))
+  
+  ####### FILTER DATA USING NB MODEL AND SNR
+    # Calculate total guides per cell after pre-filtering
+    pb <- long_counts %>% 
+      group_by(gene_id) %>%
+      mutate(cells_with_guide=n()) %>%  ungroup() %>% 
+      group_by(cellid) %>% mutate(n_guides_per_cell = sum(guide_counts)) %>% 
+      ungroup()
+    
+    # Calculate total frequency of each barcode across all samples under the assumption that more abundant barcodes are more likely to contribute to noise
+    pop_freq_bc <- pb %>% 
+      group_by(gene_id) %>% 
+      summarize(pop_freq_bc = sum(guide_counts)) %>% 
+      mutate(pop_freq_bc = round(pop_freq_bc/sum(pop_freq_bc), 6))
+    
+    # Calculate signal-to-noise ratio for each detected guide within each cell
+    pb <- left_join(pb, pop_freq_bc, by='gene_id') %>% 
+      mutate(exp_noise = pop_freq_bc*n_guides_per_cell) %>% # calculate the expected reads from noise for each cell given the total number of reads per cells
+      mutate(snr = round(guide_counts/exp_noise, 2)) # calculate signal-to-noise ratio (SNR)
+    
+    ## Use a negative binomial model to estimate the probability each barcode assigned to a cell truly belongs to that cell
+    # Estimate the dispersion parameter, theta
+    nb_model <- glm.nb(guide_counts ~ exp_noise, data = pb)
+    
+    # Function to calculate the probability of observing more than `guide_counts` if only noise is present, using a negative binomial distribution
+    calculate_p_value <- function(observed, expected) {
+      # Probability of observing n counts or more, given expected noise
+      p_value <- pnbinom(observed - 1, size = nb_model$theta, mu = expected, lower.tail = FALSE)
+      return(p_value)
+    }
+    
+    # Calculate probability of noise for each row
+    pb <- pb %>%
+      rowwise() %>%
+      mutate(p_value = calculate_p_value(guide_counts, exp_noise)) %>%
+      ungroup()
+    
+    # Calculate p-adjust and assign true barcodes based on p-adj significant threshold of 0.05
+    pb <-pb %>% 
+      mutate(adjusted_p_value = p.adjust(p_value, method = "BH")) %>%
+      mutate(is_true_barcode = ifelse(adjusted_p_value < p_cut, TRUE, FALSE))                  ############ PARAMETER = p_cut
+  
+  ####### FILTER ON PROBABILITY TRUE BARCODE AND NUMBER OF CLONES WITHIN A REPLICATE
+    # count number of clones within each replicate assigned a barcode and filter on minimum clones per replicate
+    color_assign <- pb %>% filter(is_true_barcode == TRUE) %>% 
+      left_join(meta, by='cellid') %>% 
+      left_join(features, by='gene_id') %>% 
+      dplyr::select(cellid, barid, exp_color, condition, replicate) %>% mutate(dummy='dummy') %>% arrange(barid) %>% 
+      pivot_wider(names_from = dummy, values_from = barid, values_fn = list) %>% 
+      rowwise() %>% mutate(barpairid = paste(unlist(dummy), collapse='_')) %>% dplyr::select(-dummy)  %>% 
+      group_by(barpairid) %>% 
+      mutate(clone_count = n()) %>% ungroup() %>%                                              
+      group_by(barpairid, condition, replicate) %>% 
+      mutate(clon_count_in_rep = n()) %>% 
+      filter(clon_count_in_rep >= min_clone_per_rep) %>% # filter on minimum clones in replicate    ############ PARAMETER = min_clone_per_rep
+      group_by(barpairid) %>% 
+      mutate(clone_count = n()) %>% ungroup()
+  
+    # Assign color to each clone based on assigned barcodes
+    color_map <- color_assign %>% dplyr::select(barpairid) %>% distinct() %>% rowwise() %>% 
+      mutate(clone_color = case_when(  (grepl("g", barpairid) && grepl("r", barpairid)) == TRUE ~ 'fusion',
+                                      ((grepl("g", barpairid)==TRUE) && grepl("r", barpairid) ==FALSE) == TRUE ~ 'green',
+                                      ((grepl("g", barpairid)==FALSE) && grepl("r", barpairid) ==TRUE) == TRUE ~ 'red')) 
+    
+    color_assign <- left_join(color_assign, color_map, by='barpairid') 
+  
+  ####### SUMARIZE RESULTS
+    # Calculate percent fusion cells in each sample
+    summary <- color_assign %>% ungroup() %>% 
+      group_by(condition, replicate) %>% 
+      mutate(total_count=n()) %>% 
+      filter(clone_color !='fusion') %>% 
+      group_by(condition, replicate, total_count) %>% 
+      summarize(singleColor_count=n()) %>% 
+      mutate(perc_fusion = 1-round(singleColor_count/total_count,4)) %>% ungroup() 
+    
+    # Compute error between perc fusion of filtered data to flow data
+    sse <- flow_fusion %>% filter(cellLine == cellline) %>% 
+      left_join(summary, by=c('condition', 'replicate')) %>% 
+      mutate(error = (perc_fusion-perc_fusion_flow)^2) %>% 
+      summarize(sse = sum(error)) %>% pull(sse)
+    
+    # Calculate total number of barcoded cells and total number of unique clones in the filtered sample
+    n_barcoded_cells <- nrow(color_assign)
+    n_unique_clones <- length(color_assign %>% filter(condition %in% c('presort','initial')) %>% pull(barpairid) %>% unique())
+    
+  return(list(color_assign, summary, n_barcoded_cells, sse, n_unique_clones))
+}
+```
+
+
+To find the best parameter values for `min_guideReads_perCell` and `min_clone_per_rep` we will run barcode assignment with a reasonable set of parameters and compare the error between assigned % fusion cells in scRNA-seq to the expected % fusion cells from flow. The parameter values which minimize the total error across both data sets will be used. 
+```{r}
+sse_out <- data.frame()
+
+min_guideReads_perCell_options = c(3,4,5) # mgr
+min_clone_per_rep_options = c(2,3,4,5) # mclr
+p_cut_options = c(0.01, 0.05, 0.10) # pc
+
+total_tests = 2*length(min_guideReads_perCell_options)*length(min_clone_per_rep_options)*length(p_cut_options)
+
+counter = 1
+for(mgr in min_guideReads_perCell_options){
+  for(mclr in min_clone_per_rep_options){
+    for(pc in p_cut_options){
+    # print counter to monitor loop progress
+    print(paste0(counter,"/",total_tests))
+    # run barcode assignment
+    res <- optim_bc_parameters_nb(dat_use = dat_mb231,
+                                 cellline = 'mb231',
+                   min_guideReads_perCell = mgr,
+                        min_clone_per_rep = mclr,
+                                    p_cut = pc)
+    # summarize outputs of barcode assignment
+    outs <- data.frame(min_guideReads_perCell = mgr,
+                            min_clone_per_rep = mclr,
+                                        p_cut = pc,
+                                     cellline = 'mb231',
+                                          sse = res[[4]],
+                                      n_cells = res[[3]],
+                                unique_clones = res[[5]])
+    # keep outputs
+    sse_out <- rbind(sse_out, outs)
+    # iterate counter
+    counter = counter + 1
+    }
+    }
+}
+
+for(mgr in min_guideReads_perCell_options){
+  for(mclr in min_clone_per_rep_options){
+    for(pc in p_cut_options){
+    # print counter to monitor loop progress
+    print(paste0(counter,"/",total_tests))
+    # run barcode assignment
+    res <- optim_bc_parameters_nb(dat_use = dat_h1806,
+                                 cellline = 'h1806',
+                   min_guideReads_perCell =  mgr,
+                        min_clone_per_rep = mclr,
+                                    p_cut = pc)
+    # summarize outputs of barcode assignment
+    outs <- data.frame(min_guideReads_perCell = mgr,
+                            min_clone_per_rep = mclr,
+                                        p_cut = pc,
+                                     cellline = 'h1806',
+                                          sse = res[[4]],
+                                      n_cells = res[[3]],
+                                unique_clones = res[[5]])
+    # keep outputs
+    sse_out <- rbind(sse_out, outs)
+    # iterate counter
+    counter = counter + 1
+    }
+  }
+}
+
+#sse_out %>% group_by(cellline) %>% arrange(sse) %>% slice_head(n=5) 
+
+sse_out %>% group_by(min_guideReads_perCell, min_clone_per_rep, p_cut) %>%
+  summarize(sse_both = sum(sse)) %>% arrange(sse_both) %>% head(3)
+```
+
+
+
+
+
+
+Based on the above analysis, we see that requiring a minimum of 3 reads per guide per cell and a minimum of 3 cells with the same barcode/barcode pair per replicate produces the results with the lowest sum-squared error. These parameter values will be used to assign barcodes for downstream analysis
+```{r assign barcodes to each cell}
+# run barcode assignment with parameter set which produced the lowest sse
+mb231_out <- optim_bc_parameters_nb(dat_use = dat_mb231, 
+                                   cellline = 'mb231',
+                     min_guideReads_perCell = 3,
+                          min_clone_per_rep = 3)
+
+h1806_out <- optim_bc_parameters_nb(dat_use = dat_h1806, 
+                                   cellline = 'h1806',
+                     min_guideReads_perCell = 3,
+                         min_clone_per_rep = 3)
+
+# inspect % fusion results
+mb231_out[[2]]
+h1806_out[[2]]
+```
+
+```{r}
+# function to add assigned barcode meta data to seurat
+add_meta_bar_assign <- function(dat, assign_bar_out){
+  # calculate n_gfp_bars from gbarid, and n_mch_bar from rbarid
+  long <- assign_bar_out[[1]] %>% dplyr::select(barpairid) %>% distinct() %>%
+    mutate(full_barid = barpairid) %>% rowwise() %>% 
+    separate(full_barid, into=c('b1','b2','b3','b4')) %>% 
+    pivot_longer(-c(barpairid), names_to = 'bar_iter', values_to = 'sub_bar') %>% drop_na() %>% dplyr::select(-bar_iter) %>% 
+    mutate(sub_bar_color = case_when( (grepl("g", sub_bar)==TRUE) == TRUE ~ 'gbarid', 
+                                      (grepl("r", sub_bar)==TRUE) == TRUE ~ 'rbarid', 
+                                      .default='ubarid') ) %>% arrange(sub_bar)  
+  
+  if('ubarid' %in% unique(long$sub_bar_color)){
+    wide <- long %>% pivot_wider(names_from = sub_bar_color, values_from = sub_bar, values_fn = list) %>% 
+      rowwise() %>% 
+      mutate(gbarid = paste(unlist(gbarid), collapse='_'), 
+             rbarid = paste(unlist(rbarid), collapse='_'), 
+             ubarid = paste(unlist(ubarid), collapse='_')) %>% 
+      ungroup()
+      wide$ubarid[wide$ubarid==""] <- NA
+  }
+  if('ubarid' %notin% unique(long$sub_bar_color)){
+   wide <- long %>% pivot_wider(names_from = sub_bar_color, values_from = sub_bar, values_fn = list) %>% 
+     rowwise() %>% mutate(gbarid = paste(unlist(gbarid), collapse='_'), 
+                          rbarid = paste(unlist(rbarid), collapse='_')) %>% 
+     ungroup()
+  }
+  
+   wide <- wide %>% mutate(n_bar_cell = 1+str_count(barpairid, "_"), n_gfp_bars = 1+str_count(gbarid, "_"), n_mch_bars = 1+str_count(rbarid, "_")) 
+   wide$gbarid[wide$gbarid==""] <- NA
+   wide$rbarid[wide$rbarid==""] <- NA
+   
+   add_meta <- left_join(assign_bar_out[[1]] %>% dplyr::select(cellid, barpairid, clone_color, condition),
+                         wide, 
+                         by='barpairid') %>% 
+     mutate(fusion = case_when(clone_color == 'fusion' & condition == 'fusion' ~ 'fusion', .default='other')) %>% 
+     mutate(multibar = case_when(n_bar_cell > 1 ~ 'multibar', .default='other')) %>% column_to_rownames('cellid')
+  
+   dat <- AddMetaData(dat, metadata = add_meta)
+   return(dat)
+}
+
+# add meta data to seurat
+dat_mb231_new <- add_meta_bar_assign(dat=dat_mb231, assign_bar_out=mb231_out)
+dat_h1806_new <- add_meta_bar_assign(dat=dat_h1806, assign_bar_out=h1806_out)
+```
+
+```{r save rds}
+# save files
+# saveRDS(dat_mb231_new, './data/rds/mb231_nb-barassigned_ccclustered_precc_singlets.rds')
+# saveRDS(dat_h1806_new, './data/rds/h1806_nb-barassigned_ccclustered_precc_singlets.rds')
+```
+
+
+```{r session info}
+sessionInfo()
+```

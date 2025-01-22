@@ -1,0 +1,402 @@
+```{r, show=FALSE, warnings=FALSE}
+suppressWarnings(library(tidyverse))
+suppressWarnings(library(Seurat))
+suppressWarnings(library(wesanderson))
+source('functions/deFunctions.R')
+`%notin%` <- negate(`%in%`)
+```
+
+## Load classified data
+```{r}
+mb231 <- readRDS('./data/rds/mb231_colors_cellclass_hclust_nb-barassigned_ccclustered_precc_singlets.rds')
+h1806 <- readRDS('./data/rds/h1806_colors_cellclass_hclust_nb-barassigned_ccclustered_precc_singlets.rds')
+```
+
+
+
+```{r}
+#dat <- mb231
+
+###### ###### ###### ###### ###### ###### ###### ###### ###### ###### 
+###### subset data on fusogenic versus never fuser with binomial correction
+subset_on_fusogenic_binom <- function(dat, cellline='h1806', pcut = 0.05, n_cell_min = 5,  multifuser_confidence = 'high'){
+  
+  dat@meta.data$n_isFusionParent[is.na(dat@meta.data$n_isFusionParent)==TRUE] <- 0
+  
+  # calculate proportion of each clone in the early timepoints, separated by clone color
+  clonal_proportion <- dat@meta.data %>% 
+    filter(condition %in% c('initial')) %>% 
+    dplyr::select(barpairid, clone_color) %>% drop_na() %>% group_by(clone_color) %>% 
+    mutate(total_bc_cells_pre = n()) %>% 
+    group_by(barpairid, clone_color) %>% 
+    mutate(clone_prop_pre = n()/total_bc_cells_pre) %>% 
+    dplyr::select(-total_bc_cells_pre) %>% 
+    arrange(desc(clone_prop_pre)) %>% 
+    distinct() %>% dplyr::rename('parent_id'='barpairid') %>% ungroup()
+  
+  # calculate proportion of each barcode observed in fusion cells, separated by clone color
+  occurence_in_fusion <- dat@meta.data %>% 
+    filter(condition %in% c('fusion')) %>% 
+    filter(isConfidentFusion==TRUE) %>% 
+    select(barpairid, gbarid, rbarid) %>% 
+    distinct() %>%
+    mutate(n_fusion_clones = n()) %>% 
+    pivot_longer(c(gbarid, rbarid), values_to='parent_id') %>% 
+    group_by(parent_id, name, n_fusion_clones) %>% summarize(count_in_fusion = n(), prop_in_fusion = n()/n_fusion_clones) %>% 
+    mutate(clone_color = case_when(name=='gbarid' ~'green', name=='rbarid' ~'red')) %>% ungroup() %>% 
+    dplyr::select(n_fusion_clones, parent_id, clone_color, count_in_fusion, prop_in_fusion) %>% distinct() %>% ungroup()
+  
+  # join data
+  # compute expected counts for each clone based on random probability 
+  # this will simply be the initial proportion times the number of observed fusion events
+  compare <- full_join(clonal_proportion, occurence_in_fusion) %>% 
+    arrange(desc(count_in_fusion)) %>% 
+    mutate(across(everything(), ~ replace_na(.x, 0))) %>% 
+    ungroup() %>% 
+    mutate(expected_count = clone_prop_pre*n_fusion_clones)
+
+  # Asks if the true probability of success is greater than expected from proportion
+  # low p-value = more likely
+  high_confidence_fusers <- compare %>% filter(count_in_fusion > 0) %>% rowwise() %>% 
+    mutate(binom_test = binom.test(x = count_in_fusion, n = n_fusion_clones, p = clone_prop_pre, alternative = "greater")$p.value) %>% 
+    arrange((binom_test)) %>% filter(binom_test <= pcut) %>% pull(parent_id) %>% sort()
+  
+  #### classify cells
+  high_confidence_parents <- dat@meta.data %>% 
+    dplyr::filter(condition %in% c('presort','initial')) %>%
+    dplyr::select(rbarid, gbarid) %>% 
+    pivot_longer(c(rbarid,gbarid)) %>% 
+    dplyr::select(value) %>% 
+    drop_na() %>% 
+    group_by(value) %>% filter(value %in% high_confidence_fusers) %>% 
+    summarize(Freq = n()) %>% 
+    dplyr::filter(Freq >= n_cell_min) %>% 
+    pull(value) %>% unique() %>% sort()
+  
+  low_confidence_parents <- dat@meta.data  %>% 
+    dplyr::filter(n_isFusionParent > 0, condition %in% c('presort','initial')) %>% 
+    dplyr::select(rbarid, gbarid) %>% 
+    pivot_longer(c(rbarid,gbarid)) %>% 
+    dplyr::filter(value %notin% high_confidence_parents) %>% 
+    drop_na() %>% 
+    group_by(value) %>% summarize(Freq = n()) %>% 
+    dplyr::filter(Freq >= n_cell_min) %>% 
+    pull(value) %>% unique() %>% sort()
+  
+  not_parents <- dat@meta.data  %>% 
+    dplyr::filter(n_isFusionParent == 0, condition %in% c('presort','initial')) %>% 
+    dplyr::select(rbarid, gbarid) %>% 
+    pivot_longer(c(rbarid,gbarid)) %>% 
+    dplyr::filter(value %notin% high_confidence_parents) %>% 
+    dplyr::select(value) %>% 
+    drop_na() %>% 
+    group_by(value) %>% 
+    summarize(Freq = n()) %>% 
+    dplyr::filter(Freq >= n_cell_min) %>% 
+    pull(value) %>% unique() %>% sort()
+  ####
+  
+  # remove ESAM-neg cluster from mb231 analysis since cell sorting removed these from control
+    if(cellline=='mb231'){
+      # Calculate average expression per cluster
+      esam_expression <- t(AverageExpression(dat, features = c('ESAM'), group.by = 'seurat_clusters')$RNA)
+      esam_pos_clust <- data.frame(esam_expression) %>% rownames_to_column('clust') %>% mutate(clust = substring(clust, 2)) %>% filter(ESAM > 0.4) %>% pull(clust)
+      dat <- subset(dat, subset = seurat_clusters %in% esam_pos_clust)
+    }
+  
+  
+  # Add classifications to meta data
+  # classify cells as fusion parents or progeny or not_parent
+  dat@meta.data <- dat@meta.data %>% 
+    mutate(cell_class = case_when((gbarid %in% high_confidence_parents & condition %in% c('presort','initial')) ~ 'parent',
+                                  (rbarid %in% high_confidence_parents & condition %in% c('presort','initial')) ~ 'parent', 
+                                  (gbarid %in%  low_confidence_parents & condition %in% c('presort','initial')) ~ 'parent_lc',
+                                  (rbarid %in%  low_confidence_parents & condition %in% c('presort','initial')) ~ 'parent_lc', 
+                                  (gbarid %in% not_parents             & condition %in% c('presort','initial')) ~ 'not_parent',
+                                  (rbarid %in% not_parents             & condition %in% c('presort','initial')) ~ 'not_parent',
+                                  .default = 'other'))
+  
+  # subset data
+  if(multifuser_confidence == 'high'){
+    dat_fusogenic <- subset(dat, subset = cell_class %in% c('parent', 'not_parent') )
+  }
+  if(multifuser_confidence=='any'){
+    dat_fusogenic <- subset(dat, subset = cell_class %in% c('parent','parent_lc', 'not_parent') )
+    dat_fusogenic$cell_class[dat_fusogenic$cell_class=='parent_lc'] <- 'parent'
+  }
+  
+  
+  return(list(dat_fusogenic))
+}
+```
+
+
+
+
+
+## Subset data
+Only look at cells in the early timepoint samples with at least 5 cells per clone across all samples. Fusogenic cells will be defined as cells which appeared more often in fusion clones than expected by random chance. Non-fusers will be defined as cells which were not observed to participate in fusion in the experiment. As the ESAM- cells were selected against in the MDA-MB-231 cells due to sorting, cells of this identity will be excluded from analysis.
+```{r}
+fuso_mincells_h1806 <- subset_on_fusogenic_binom(dat=h1806, cellline='h1806', 
+                                                 n_cell_min = 1, 
+                                                 pcut = 0.05,
+                                                 multifuser_confidence = 'high')
+fuso_h1806 <- fuso_mincells_h1806[[1]]
+Idents(fuso_h1806) <- "cell_class"
+
+fuso_mincells_mb231 <- subset_on_fusogenic_binom(dat=mb231, cellline='mb231',
+                                                 n_cell_min = 1, 
+                                                 pcut = 0.05, 
+                                                 multifuser_confidence = 'high')
+fuso_mb231 <- fuso_mincells_mb231[[1]]
+Idents(fuso_mb231) <- "cell_class"
+```
+
+## Inspect clonal composition of subsetted data
+```{r}
+plot_clonal_composition_byclass(fuso_h1806, class_levels = c('not_parent','parent')) + ggtitle('HCC1806')
+plot_clonal_composition_byclass(fuso_mb231, class_levels = c('not_parent','parent')) + ggtitle('MDA-MB-231')
+
+
+fuso_mb231@meta.data %>% filter(cell_class =='parent') %>% pull(barpairid) %>% unique() %>% sort()
+fuso_h1806@meta.data %>% filter(cell_class =='parent') %>% pull(barpairid) %>% unique() %>% sort()
+```
+
+## Insepct cluster membership of highly selected parental cell
+```{r}
+# what percent of parent cells is in each meta cluster?
+
+plot_by_cluster <- function(subset_obj, full_obj){
+  uniq <- subset_obj@meta.data %>% select(barpairid, cell_class, clust, condition, n_isFusionParent) %>% filter(cell_class =='parent')  %>% group_by(clust) %>% summarize(n_clones=length(unique(barpairid)))
+  
+  total<-subset_obj@meta.data %>% select(barpairid, cell_class, clust, condition, n_isFusionParent) %>% filter(cell_class =='parent')  %>% group_by(clust) %>% summarize(n_cells=length((barpairid)))
+  
+  cells <- total %>% mutate(`cells` = round(100*n_cells/sum(total$n_cells),2))
+  
+  clones <- uniq %>% mutate(`clones` = round(100*n_clones/sum(uniq$n_clones),2))
+  
+  parent_per_cluster <- left_join(cells, clones, by='clust')
+  
+  parent_per_cluster_long <- parent_per_cluster %>% pivot_longer(c(`cells`,`clones`), names_to='stat', values_to='percent')
+  
+  n_clust <- length(unique(full_obj@meta.data$clust))
+  
+  dpar <- ggplot(parent_per_cluster_long, aes(x=as.factor(clust), y=percent, fill=stat)) +
+    geom_bar(stat='identity', position="dodge", color='black', size=0.1) + 
+      theme_classic() + theme(strip.background = element_blank()) +
+      scale_fill_manual(values=c('grey60','grey20'))  + 
+      ylab('Parental clone origin (%)') + xlab('Cluster') + labs(fill='') 
+  
+  dpar_facet <- dpar +
+  geom_text(aes(label=paste0(round(percent,1),'%')),size=2.5, vjust=-0.5) +
+  facet_wrap(~stat) + theme(strip.text.x = element_blank())
+
+  dpar_facet
+  return(list(dpar, dpar_facet))
+}
+s
+
+plot_by_cluster(fuso_h1806, h1806)
+plot_by_cluster(fuso_mb231, mb231)
+```
+
+
+
+## Perform statistical analysis of gene expression differences
+Above we see that the clonal composition is skewed. To account for underlying clonal composition, we will used a mixed model to perform differential expression analysis, setting cell barcode as the random effect (i.e. the subject id). MAST (https://github.com/RGLab/MAST) is a package which allows for this analysis and more complex models, but is slow. NEBULA (https://github.com/lhe17/nebula) has a much faster implementation for simple mixed models when accounting for a single random effect. We will use NEBULA.
+```{r}
+sample_name = 'binom_fusers_p05'
+min_pct =0.1
+test_group = 'parent'
+
+
+# run mixed model for DE analysis
+h1806_neb <- run_nebula_de(fuso_h1806, method='LN', min.pct=min_pct, n_cores=16, min.cpc=0.01, sid = 'barpairid', group = 'cell_class')
+mb231_neb <- run_nebula_de(fuso_mb231, method='LN', min.pct=min_pct, n_cores=16, min.cpc=0.01, sid = 'barpairid', group = 'cell_class')
+
+# write.table(h1806_neb[[1]], file=paste0('outdata/de_results/nebula/nebula_',min_pct,'pct_h1806_',sample_name,'_raw.tsv'), 
+#             quote=FALSE, sep='\t', col.names = TRUE)
+# write.table(mb231_neb[[1]], file=paste0('outdata/de_results/nebula/nebula_',min_pct,'pct_mb231_',sample_name,'_raw.tsv'), 
+#             quote=FALSE, sep='\t', col.names = TRUE)
+# 
+# capture.output(h1806_neb, file=paste0('outdata/de_results/nebula/nebula_qc/nebula_',min_pct,'pct_h1806_',sample_name,'.tsv'))
+# capture.output(mb231_neb, file=paste0('outdata/de_results/nebula/nebula_qc/nebula_',min_pct,'pct_mb231_',sample_name,'.tsv'))
+# 
+# # calculate Pearson residuals
+# h1806_pres <- get_pearson_nebula(h1806_neb, fuso_h1806, method='LN', min.pct=0.1, n_cores=16, min.cpc=0.01, sid = 'barpairid', group = 'cell_class')
+# mb231_pres <- get_pearson_nebula(mb231_neb, fuso_mb231, method='LN', min.pct=0.1, n_cores=16, min.cpc=0.01, sid = 'barpairid', group = 'cell_class')
+# 
+# capture.output(h1806_pres, file=paste0('outdata/de_results/nebula/nebula_qc/nebula_',min_pct,'pct_h1806_',sample_name,'_pearson_residuals.tsv'))
+# capture.output(mb231_pres, file=paste0('outdata/de_results/nebula/nebula_qc/nebula_',min_pct,'pct_mb231_',sample_name,'_pearson_residuals.tsv'))
+# 
+# # format outputs for downstream analysis
+# h1806_neb_format <- format_neb_outs(h1806_neb, testgroup = test_group) #%>% mutate(log2FC = -log2FC) # test_group was flipped
+# mb231_neb_format <- format_neb_outs(mb231_neb, testgroup = test_group) #%>% mutate(log2FC = -log2FC) # test_group was flipped
+# 
+# write.table(h1806_neb_format, file=paste0('outdata/de_results/nebula/nebula_',min_pct,'pct_h1806_',sample_name,'.tsv'), 
+#             quote=FALSE, sep='\t', col.names = TRUE)
+# write.table(mb231_neb_format, file=paste0('outdata/de_results/nebula/nebula_',min_pct,'pct_mb231_',sample_name,'.tsv'), 
+#             quote=FALSE, sep='\t', col.names = TRUE)
+```
+
+
+
+#########
+Inspect results
+```{r}
+mb231.res <- read.csv(paste0('outdata/de_results/nebula/nebula_0.1pct_mb231_binom_fusers_p05.tsv'), sep='\t') %>% arrange(desc(log2FC))
+h1806.res <- read.csv(paste0('outdata/de_results/nebula/nebula_0.1pct_h1806_binom_fusers_p05.tsv'), sep='\t') %>% arrange(desc(log2FC))
+# 
+# 
+# mb231.res <- mb231_neb_format %>% arrange(desc(log2FC))
+# h1806.res <- h1806_neb_format %>% arrange(desc(log2FC))
+# 
+l2cut = 0.4
+
+padj_cut = 1
+
+sig_mb231 <- mb231.res %>% filter(abs(log2FC) > l2cut, p_val_adj <= padj_cut)
+sig_h1806 <- h1806.res %>% filter(abs(log2FC) > l2cut, p_val_adj <= padj_cut)
+
+top_shared <- intersect(sig_h1806 %>% filter(log2FC > 0) %>% pull(gene), sig_mb231 %>% filter(log2FC > 0) %>% pull(gene))
+bot_shared <- intersect(sig_h1806 %>% filter(log2FC < 0) %>% pull(gene), sig_mb231 %>% filter(log2FC < 0) %>% pull(gene))
+
+top_shared %>% sort()
+```
+
+```{r}
+ggplot(mb231.res %>% filter(gene %notin% c('EGFP','MCHERRY')), aes(x=log2FC, y=-log10(p_val_adj)))+
+  geom_point()
+ggplot(h1806.res %>% filter(gene %notin% c('EGFP','MCHERRY')), aes(x=log2FC, y=-log10(p_val_adj)))+
+  geom_point()
+
+mb231.res %>% arrange(log2FC)
+```
+
+
+
+```{r run gsea}
+source('functions/gseaFunctions.R')
+binom_p05_only.gsea <- run_gsea_on(mb231.res, h1806.res, 
+                           min_geneset_size = 20, 
+                           gs_list = list(h.hallmarks, c5.go.biological_process, c2.KEGG, c5.go.molecular_function))
+
+
+
+source('functions/gseaFunctions.R')
+save_gsea_outs(binom_p05_only.gsea, filename='gsea_cluster_binom_p05_only_1127.tsv')
+binom_p05_only.gsea <- load_gsea_outs(filename='gsea_cluster_binom_p05_only_1127', data_col_id = 'binom_p05_112_only')
+binom_p05.gsea <- load_gsea_outs(filename='gsea_cluster_binom_p05_1127', data_col_id = 'binom_p05_112')
+```
+
+
+```{r}
+n_plot= 30
+p_thresh = 1
+padj_thresh = 0.25
+NES_min_thresh = 0
+pick_gs = 'GOBP'#'HALLMARK'# '# 'GOBP'#'GOBP' #'HALLMARK
+
+dot_plot_gsea(binom_p05.gsea,
+              pick_gs = pick_gs,
+              data_title = 'parent binom p05',
+              pval_threshold  = p_thresh,
+              padj_threshold  = padj_thresh,
+              NES_min = NES_min_thresh,
+              n_pathway_plot = n_plot,
+              min_celllines_in=1,
+              gs_name_length=1,
+              only_pos = TRUE)
+
+# dot_plot_gsea(binom_p05_only.gsea,
+#               pick_gs = pick_gs,
+#               data_title = 'parent binom p05 only',
+#               pval_threshold  = p_thresh,
+#               padj_threshold  = padj_thresh,
+#               NES_min = NES_min_thresh,
+#               n_pathway_plot = n_plot,
+#               min_celllines_in=2,
+#               gs_name_length=1,
+#               only_pos = TRUE)
+```
+
+```{r}
+### ### ### ### ### ### ### ### ### ### ### ### ### ### ### ### ### ### ### 
+### plot results
+
+pick_gs = 'GOBP'
+#pick_gs = 'GOBP'
+gsea.outs = binom_p05.gsea 
+pval_threshold  = 1
+padj_threshold  = 0.25
+NES_min = 0
+n_pathway_plot = 20
+min_celllines_in=1
+gs_name_length=1
+data_title = ''
+only_pos = TRUE
+  # relabel pathway to not include underscores and gene set name, create new column with gene set name
+  # only plot pathways which are significant in at least one cell line
+  filterpaths <- gsea.outs %>% filter(gs==pick_gs) %>% rowwise() %>% mutate(gs = paste((str_split(pathway, pattern='_')[[1]][1:gs_name_length]),  collapse = " ")) %>% 
+    mutate(pathway = paste((str_split(pathway, pattern='_')[[1]][-1:-gs_name_length]),  collapse = " ")) %>% 
+    group_by(pathway) %>% mutate(n_samples = n()) %>% ungroup() %>% filter(n_samples >= min_celllines_in) %>% group_by(pathway) %>% 
+    mutate(sumNES = sum(NES, na.rm=TRUE)) %>% arrange(desc(sumNES))
+  
+  
+  top_mb231 <- filterpaths %>% 
+    filter(cellline == 'MDA-MB-231') %>% 
+    filter(padj <= pval_threshold & padj <= padj_threshold & NES >= NES_min ) %>% 
+    arrange(desc(NES)) %>% 
+    head(n_pathway_plot) %>%
+    pull(pathway)
+  
+  top_h1806 <- filterpaths %>% 
+    filter(cellline == 'HCC1806') %>% 
+    filter(padj <= pval_threshold & padj <= padj_threshold & NES >= NES_min ) %>% 
+    arrange(desc(NES)) %>% 
+    head(n_pathway_plot) %>%
+    pull(pathway)
+  
+  bot_mb231 <- filterpaths %>% 
+    filter(cellline == 'MDA-MB-231') %>% 
+    filter(padj <= pval_threshold & padj <= padj_threshold & NES <= -NES_min ) %>% 
+    arrange((NES)) %>% 
+    head(n_pathway_plot) %>%
+    pull(pathway)
+  
+  bot_h1806 <- filterpaths %>% 
+    filter(cellline == 'HCC1806') %>% 
+    filter(padj <= pval_threshold & padj <= padj_threshold & NES <= -NES_min ) %>% 
+    arrange((NES)) %>% 
+    head(n_pathway_plot) %>%
+    pull(pathway)
+  
+  # extract pathways that are high in both and significant in at least one
+  high <- c(top_mb231, top_h1806)
+  # extract pathways that are low in both and significant in at least one
+  lows <- c(bot_mb231, bot_h1806)
+  
+  if(only_pos == TRUE){
+    lows <- c()
+  }
+  
+  # filter data for plotting
+  fgsea.outs.plot <- filterpaths %>% filter(pathway %in% c(high, lows)) %>% arrange(sumNES) %>% dplyr::select(pathway, padj, NES, cellline, gs, sumNES)
+   means <- fgsea.outs.plot %>% group_by(pathway) %>% summarize(, padj = mean(padj), NES = mean(NES)) %>% mutate(cellline = 'mean', gs=pick_gs, sumNES=0)
+  
+  fgsea.outs.plot <- rbind(fgsea.outs.plot, means)
+  
+  # set plot order
+  #fgsea.outs.plot$pathway <- factor(x = fgsea.outs.plot$pathway, levels = unique(fgsea.outs.plot$pathway))
+  fgsea.outs.plot$pathway <- factor(x = fgsea.outs.plot$pathway, levels = fgsea.outs.plot %>% filter(cellline=='mean') %>% arrange((NES)) %>% pull(pathway))
+  
+  
+  dot_plot <- ggplot(fgsea.outs.plot, aes(y=pathway, x=NES)) +
+    geom_point(aes(color=as.factor(cellline), size=-log10(padj)), alpha=0.8) +
+    theme_bw() + 
+    scale_color_manual(values=c('MDA-MB-231'='#F8766D', 'HCC1806'='#00BFC4', 'mean' = 'black')) +
+    ggtitle(paste0(pick_gs,' ',data_title)) + ylab('') + labs(color = "cell line") + geom_vline(xintercept=0, linewidth=0.1) + 
+    theme(axis.text.y = element_text(size = 5))
+
+  dot_plot
+```

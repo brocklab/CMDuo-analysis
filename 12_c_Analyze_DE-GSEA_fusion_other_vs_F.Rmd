@@ -1,0 +1,212 @@
+```{r}
+library(tidyverse)
+library(fgsea)
+`%notin%` <- negate(`%in%`)
+source('functions/gseaFunctions.R')
+source('functions/deVolcano.R')
+fig_path <- "./plots/fusion_de_analysis/"
+```
+
+```{r import de and gsea results}
+outs <- load_de_gsea_for_analysis('fusion_in_clustF_vs_other')
+
+mb231.res <- outs[['mb231.res']]
+h1806.res <- outs[['h1806.res']]
+gsea <- outs[['gsea']]
+```
+
+
+## sig genes
+```{r }
+l2fc_cutoff = 0.2
+pval_cutoff = 0.05
+
+top.mb231 <- mb231.res %>% filter(log2FC > l2fc_cutoff, p_val_adj < pval_cutoff)  %>% pull(gene)
+top.h1806 <- h1806.res %>% filter(log2FC > l2fc_cutoff, p_val_adj < pval_cutoff)  %>% pull(gene)
+
+bot.mb231 <- mb231.res %>% filter(log2FC < -l2fc_cutoff, p_val_adj < pval_cutoff) %>% arrange(log2FC)  %>% pull(gene)
+bot.h1806 <- h1806.res %>% filter(log2FC < -l2fc_cutoff, p_val_adj < pval_cutoff) %>% arrange(log2FC) %>% pull(gene)
+
+toppers <- intersect(top.h1806, top.mb231)
+bottoms <- intersect(bot.h1806, bot.mb231)
+
+sig_genes <- rbind(mb231.res %>% mutate(cellline='MDA-MB-231'), h1806.res %>% mutate(cellline='HCC1806')) %>% arrange(cellline) %>% filter(gene %in% c(toppers, bottoms)) %>% select(cellline, gene, log2FC) %>% pivot_wider(names_from = cellline, values_from = log2FC) %>% rowwise() %>%  mutate(HCC1806=round(HCC1806, 3), `MDA-MB-231`=round(`MDA-MB-231`, 3), mean_log2FC = mean(HCC1806, `MDA-MB-231`)) %>% arrange(desc(mean_log2FC))
+
+
+# write.table(sig_genes, file='outdata/de_results/de_sig_genes/sig_genes_fusion_only_other_versus_F.tsv', quote=FALSE, sep='\t', col.names = TRUE)
+# sig_genes %>% filter(HCC1806 > 0.35, `MDA-MB-231` > 0.35) %>% arrange(desc(mean_log2FC)) %>% pull(gene) %>% data.frame()
+# sig_genes %>% filter(HCC1806 < -0.35, `MDA-MB-231` < -0.35) %>% arrange((mean_log2FC)) %>% pull(gene) %>% data.frame()
+
+cat(paste0("p-adj < ",pval_cutoff," and abs(log2FC) > ",l2fc_cutoff,"\n"))
+cat(paste0("\nMDA-MB-231:\n",
+" ",nrow(mb231.res)," total genes tested\n",
+"  ", length(top.mb231)+length(bot.mb231)," significant genes\n",
+"   - ",length(top.mb231)," sig up\n",
+"   - ",length(bot.mb231)," sig down\n"))
+
+cat(paste0("\nHCC1806:\n",
+" ",nrow(h1806.res)," total genes tested\n",
+"  ", length(top.h1806)+length(bot.h1806)," significant genes\n",
+"   - ",length(top.h1806)," sig up\n",
+"   - ",length(bot.h1806)," sig down\n"))
+
+cat(paste0("\nShared:\n",
+"  ", length(toppers)+length(bottoms)," shared sig genes\n",
+"   - ",length(toppers)," shared up\n",
+"   - ",length(bottoms)," shared down\n"))
+```
+
+```{r}
+l2fc_cutoff = 0.5
+l2fc_cutoff_F = 0.5
+pval_cutoff = 0.05
+
+top.mb231 <- mb231.res %>% filter(log2FC > l2fc_cutoff, p_val_adj < pval_cutoff)  %>% pull(gene)
+top.h1806 <- h1806.res %>% filter(log2FC > l2fc_cutoff, p_val_adj < pval_cutoff)  %>% pull(gene)
+
+bot.mb231 <- mb231.res %>% filter(log2FC < -l2fc_cutoff_F, p_val_adj < pval_cutoff) %>% arrange(log2FC) %>% pull(gene)
+bot.h1806 <- h1806.res %>% filter(log2FC < -l2fc_cutoff_F, p_val_adj < pval_cutoff) %>% arrange(log2FC) %>% pull(gene)
+
+genes_to_highlight <- c(intersect(top.h1806, top.mb231), intersect(bot.h1806, bot.mb231))
+
+# intersect(top.h1806, top.mb231) %>% data.frame()
+# intersect(bot.h1806, bot.mb231) %>% data.frame()
+```
+
+
+## Volcano plots
+```{r}
+label_size = 2.5
+label_pad = 0.25
+n_genes_top_display = 15
+n_genes_shared_display = 30
+title_font = 16
+plot_font = 14
+
+
+ph <- DE_volcano_top_and_pick_geneset(res = h1806.res %>% mutate(log2FC=-log2FC), # flip so that cluster F is on right side
+                        shared_genes = c(bottoms, toppers),
+                        highlight_shared_genes = genes_to_highlight,
+                        title=paste0('HCC1806 cluster F vs. other clusters (fusion only)'), 
+                        p_cut = 0.05, 
+                        l2fc_cut = 0.1, 
+                        n_genes_top = n_genes_top_display,
+                        n_genes_shared = n_genes_shared_display,
+                        gene_label_size = label_size,
+                        label.padding = label_pad,
+                        axis_title_font_size = plot_font,
+                        plot_title_font_size = title_font,
+                        xmax = 2,
+                        ymin = -1,
+                        ymax = 50,
+                        pick_seed = 123,
+                        top_color = '#dbd4c3',#'#F8766D', #'#00BFC4',
+                        colrs=c('grey30','#009cbf','grey20'),
+                        colrs_main = c('#dbd4c3','#dbd4c3'),
+                        background_point_color = '#dbd4c3',
+                        highlight_colrs = c('black','black'),
+                        highlight_shape = 17) 
+
+
+pm <- DE_volcano_top_and_pick_geneset(res = mb231.res %>% mutate(log2FC=-log2FC), # flip so that cluster F is on right side
+                        shared_genes = c(bottoms, toppers),
+                        highlight_shared_genes = genes_to_highlight,
+                        title=paste0('MDA-MB-231 cluster F vs. other clusters (fusion only)'), 
+                        p_cut = 0.05, 
+                        l2fc_cut = 0.1, 
+                        n_genes_top = n_genes_top_display,
+                        n_genes_shared = n_genes_shared_display,
+                        gene_label_size = label_size,
+                        label.padding = label_pad,
+                        axis_title_font_size = plot_font,
+                        plot_title_font_size = title_font,
+                        xmax = 2,
+                        ymin = -1,
+                        ymax = 50, ###################################
+                        pick_seed = 1234,
+                        top_color = '#dbd4c3',#'#F8766D', #'#00BFC4',
+                        colrs=c('grey30','#009cbf','grey20'),
+                        colrs_main = c('#dbd4c3','#dbd4c3'),
+                        background_point_color = '#dbd4c3',
+                        highlight_colrs = c('black','black'),
+                        highlight_shape = 17) 
+
+ph
+pm
+
+#SaveFigure(ph, 'h1806_volcano_fusion_other_vs_F', type = "png", width=6, height=4, res=600)
+#SaveFigure(pm, 'mb231_volcano_fusion_other_vs_F', type = "png", width=6, height=4, res=600)
+```
+
+## GSEA plots
+```{r}
+library(scales)
+
+n_plot= 18 # 20 didn't fit with text wrapping
+p_thresh = 1
+padj_thresh = 0.25
+NES_min_thresh = 0
+str.max = 60 
+
+hall <- dot_plot_gsea(gsea %>% mutate(NES=-NES), # flip so that cluster F is on top 
+              pick_gs='HALLMARK', 
+              pval_threshold  = p_thresh, 
+              padj_threshold  = padj_thresh, 
+              NES_min = NES_min_thresh, 
+              n_pathway_plot = n_plot, 
+              min_celllines_in = 2, 
+              gs_name_length = 1,
+              data_title = 'cluster F vs. other clusters (fusion only)', 
+              only_pos = FALSE
+              ) + scale_y_discrete(labels = label_wrap(width = str.max))
+
+hall
+
+gobp <- dot_plot_gsea(gsea %>% mutate(NES=-NES), # flip so that cluster F is on top
+              pick_gs='GOBP', 
+              pval_threshold  = p_thresh, 
+              padj_threshold  = padj_thresh, 
+              NES_min = NES_min_thresh, 
+              n_pathway_plot = n_plot, 
+              min_celllines_in = 2, 
+              gs_name_length = 1,
+              data_title = 'cluster F vs. other clusters (fusion only)', 
+              only_pos = FALSE
+              ) + scale_y_discrete(labels = label_wrap(width = str.max))
+
+gobp
+
+#SaveFigure(gobp+theme(aspect.ratio=3), 'gsea_dotplot_bulk_fusion_other_vs_F_gobp', type = "png", width=10, height=10, res=600)
+#SaveFigure(hall, 'gsea_dotplot_bulk_fusion_other_vs_F_hallmark', type = "png", width=7, height=4, res=600)
+```
+
+```{r}
+gomf <- dot_plot_gsea(gsea %>% mutate(NES=-NES), # flip so that cluster F is on top
+              pick_gs='GOMF', 
+              pval_threshold  = p_thresh, 
+              padj_threshold  = padj_thresh, 
+              NES_min = NES_min_thresh, 
+              n_pathway_plot = n_plot, 
+              min_celllines_in = 2, 
+              gs_name_length = 1,
+              data_title = 'cluster F vs. other clusters (fusion only)', 
+              only_pos = FALSE
+              ) + scale_y_discrete(labels = label_wrap(width = str.max))
+
+gomf
+
+
+kegg <- dot_plot_gsea(gsea %>% mutate(NES=-NES), # flip so that cluster F is on top
+              pick_gs='KEGG', 
+              pval_threshold  = p_thresh, 
+              padj_threshold  = 0.05, 
+              NES_min = NES_min_thresh, 
+              n_pathway_plot = 20, 
+              min_celllines_in = 2, 
+              gs_name_length = 3,
+              data_title = 'cluster F vs. other clusters (fusion only)', 
+              only_pos = FALSE
+              ) + scale_y_discrete(labels = label_wrap(width = str.max))
+
+kegg
+```

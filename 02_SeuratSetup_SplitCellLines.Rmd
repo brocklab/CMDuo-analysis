@@ -1,0 +1,187 @@
+---
+title: "02_SeuratSetup_SplitCellLines"
+author: "Andrea Gardner"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(Seurat)
+`%notin%` <- negate(`%in%`)
+```
+
+# ClonMapper Duo: Seurat Object setup
+
+## Introduction
+This notebook separates each cell line into its own Seurat object and performs normalization on each. Cell cycle regression is performed to optimize clustering and UMAP visualization.
+```{r}
+dat_qc3_scdbl <- readRDS('./data/rds/seurat_obj_dat_qc3_scdbl.rds')
+# remove doublets
+dat_qc3_scdbl_singles <- subset(dat_qc3_scdbl, subset = scDblFinder.class == 'singlet')
+```
+
+```{r}
+# subset data by cell line
+dat_h1806 <- subset(dat_qc3_scdbl_singles, subset = cellLine == 'H1806')
+dat_mb231 <- subset(dat_qc3_scdbl_singles, subset = cellLine == 'MB231')
+```
+
+```{r}
+# check QC metrics on subsets
+VlnPlot(dat_h1806, pt.size = 0.10, alpha=0.05, features = c("nFeature_RNA", "nCount_RNA", "percent_mt"), ncol = 3, group.by = 'condition')
+VlnPlot(dat_mb231, pt.size = 0.10, alpha=0.05, features = c("nFeature_RNA", "nCount_RNA", "percent_mt"), ncol = 3, group.by = 'condition')
+```
+
+
+# log normalize data
+```{r}
+dat_h1806_norm <- NormalizeData(dat_h1806, normalization.method = "LogNormalize", scale.factor = 10000)
+dat_mb231_norm <- NormalizeData(dat_mb231, normalization.method = "LogNormalize", scale.factor = 10000)
+```
+
+## Find Highly variable genes and scale data
+```{r}
+# find HVGs
+dat_h1806_norm <- FindVariableFeatures(dat_h1806_norm, selection.method = "vst", nfeatures = 10000)
+dat_mb231_norm <- FindVariableFeatures(dat_mb231_norm, selection.method = "vst", nfeatures = 10000)
+
+# scale data
+dat_h1806_norm <- ScaleData(dat_h1806_norm)
+dat_mb231_norm <- ScaleData(dat_mb231_norm)
+```
+
+# Run PCA
+```{r}
+dat_h1806_norm <- RunPCA(dat_h1806_norm)
+print(dat_h1806_norm[["pca"]], dims = 1:5, nfeatures = 5)
+VizDimLoadings(dat_h1806_norm, dims = 1:2, reduction = "pca")
+DimPlot(dat_h1806_norm, reduction = "pca", group.by = "condition") + scale_color_manual(values=c('dodgerblue','goldenrod','black','grey80')) + ggtitle('HCC1806')
+ElbowPlot(dat_h1806_norm, ndims = 50) + ggtitle('HCC1806')
+
+dat_mb231_norm <- RunPCA(dat_mb231_norm)
+print(dat_mb231_norm[["pca"]], dims = 1:5, nfeatures = 5)
+VizDimLoadings(dat_mb231_norm, dims = 1:2, reduction = "pca")
+DimPlot(dat_mb231_norm, reduction = "pca", group.by = "condition") + scale_color_manual(values=c('dodgerblue','goldenrod','black','grey80')) + ggtitle('MDA-MB-231')
+ElbowPlot(dat_mb231_norm, ndims = 50) + ggtitle('MDA-MB-231')
+```
+
+# Check cell cycle effects
+```{r}
+# cell cycle genes come pre-loaded with Seurat
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+
+# assign cell cycle scores
+dat_h1806_norm <- CellCycleScoring(dat_h1806_norm, s.features = s.genes, g2m.features = g2m.genes, set.ident = TRUE)
+dat_mb231_norm <- CellCycleScoring(dat_mb231_norm, s.features = s.genes, g2m.features = g2m.genes, set.ident = TRUE)
+
+# visualize cell cycle on umap}
+DimPlot(dat_h1806_norm, reduction = "pca", group.by = "Phase") 
+DimPlot(dat_mb231_norm, reduction = "pca", group.by = "Phase") 
+```
+
+# Save data before cell cycle regression
+```{r}
+saveRDS(dat_mb231_norm, './data/rds/mb231_singlets.rds')
+saveRDS(dat_h1806_norm, './data/rds/h1806_singlets.rds')
+```
+
+# Regress cell cycle
+This step can take a very long time (6+ hours), recommend running as script.
+```{r}
+# dat_mb231_norm.cc <- ScaleData(dat_mb231_norm, vars.to.regress = c("S.Score", "G2M.Score"), features = rownames(dat_mb231_norm))
+# saveRDS(dat_mb231_norm.cc, paste0('./data/data/rds/mb231_ccregress_singlets.rds'))
+# 
+# dat_h1806_norm.cc <- ScaleData(dat_h1806_norm, vars.to.regress = c("S.Score", "G2M.Score"), features = rownames(dat_h1806_norm))
+# saveRDS(dat_h1806_norm.cc, paste0('./data/data/rds/h1806_ccregress_singlets.rds'))
+```
+
+
+## Run PCA and UMAP on cc regressed data
+Load cell cycle regressed data
+```{r}
+dat_mb231_cc <- readRDS('./data/rds/mb231_ccregress_singlets.rds')
+dat_h1806_cc <- readRDS('./data/rds/h1806_ccregress_singlets.rds')
+```
+
+
+
+### PCA
+Run PCA and check that regressed data does not separated based on cell cycle phase
+```{r}
+dat_h1806_cc_red <- RunPCA(dat_h1806_cc)
+ElbowPlot(dat_h1806_cc_red, ndims = 50) 
+DimPlot(dat_h1806_cc_red, reduction = "pca", group.by = 'Phase')
+
+dat_mb231_cc_red <- RunPCA(dat_mb231_cc)
+ElbowPlot(dat_mb231_cc_red, ndims = 50) 
+DimPlot(dat_mb231_cc_red, reduction = "pca", group.by = 'Phase')
+```
+
+### UMAP and clustering
+Will now compute UMAP and run Louvain clustering. Will analyze clustering decisions after barcode assignment in future notebooks under the assumption that most clones will primarily be in one transcriptomic cluster
+```{r}
+dat_h1806_cc_red <- FindNeighbors(dat_h1806_cc_red, dims = 1:20)
+dat_h1806_cc_red <- RunUMAP(dat_h1806_cc_red, dims = 1:15, min.dist = 0.4) 
+
+DimPlot(dat_h1806_cc_red, reduction = "umap") 
+DimPlot(dat_h1806_cc_red, reduction = "umap", group.by = "condition") + scale_color_manual(values=c('dodgerblue','goldenrod','black','grey80'))
+
+dat_h1806_cc_red <- FindClusters(dat_h1806_cc_red, resolution = 0.18)
+DimPlot(dat_h1806_cc_red, reduction = "umap")
+```
+
+```{r}
+dat_mb231_cc_red <- FindNeighbors(dat_mb231_cc_red, dims = 1:20)
+dat_mb231_cc_red <- RunUMAP(dat_mb231_cc_red, dims = 1:15, min.dist = 0.4)
+
+DimPlot(dat_mb231_cc_red, reduction = "umap") 
+DimPlot(dat_mb231_cc_red, reduction = "umap", group.by = "condition") + scale_color_manual(values=c('dodgerblue','goldenrod','black','grey80'))
+
+dat_mb231_cc_red <- FindClusters(dat_mb231_cc_red, resolution = 0.18)
+DimPlot(dat_mb231_cc_red, reduction = "umap")
+```
+
+## Save cc regressed and clustered objects
+Save regressed and Leiden clustered data. Note that cc regressed Seurat objects are large (~10 GB) and takes an excessive amount of time to save ~10 minutes per object
+```{r}
+saveRDS(dat_mb231_cc_red, './data/rds/mb231_leiden_ccregres_singlets.rds')
+saveRDS(dat_h1806_cc_red, './data/rds/h1806_leiden_ccregres_singlets.rds')
+```
+
+As we want to use the UMAP visualization and cell clustering from the cell cycle regressed data, but want to perform downstream analysis on the non-regressed data, we will take the calculated UMAP and clustering from the cc regressed object and append it to the non-cc regressed object
+```{r}
+# load data pre-cc regression if not already loaded
+dat_mb231_norm <- readRDS('./data/rds/mb231_singlets.rds')
+dat_h1806_norm <- readRDS('./data/rds/h1806_singlets.rds')
+
+# assign umap reduction from cc regressed data to pre-cc regressed object
+dat_mb231_norm@reductions$umap <- dat_mb231_cc_red@reductions$umap
+dat_h1806_norm@reductions$umap <- dat_h1806_cc_red@reductions$umap
+
+# get clustering meta data from cc regressed object and add to pre-cc regressed object
+dat_mb231_norm@meta.data <- left_join(dat_mb231_norm@meta.data %>% rownames_to_column('cellid'), dat_mb231_cc_red@meta.data %>% rownames_to_column('cellid') %>% select(cellid, seurat_clusters), by='cellid') %>% column_to_rownames('cellid')
+dat_h1806_norm@meta.data <- left_join(dat_h1806_norm@meta.data  %>% rownames_to_column('cellid'), dat_h1806_cc_red@meta.data %>% rownames_to_column('cellid') %>% select(cellid, seurat_clusters), by='cellid') %>% column_to_rownames('cellid')
+
+# update sample identities to cluster
+Idents(dat_mb231_norm) <- 'seurat_clusters'
+Idents(dat_h1806_norm) <- 'seurat_clusters'
+
+# check that reductions and clustering was added
+DimPlot(dat_mb231_norm, reduction = 'umap')
+DimPlot(dat_h1806_norm, reduction = 'umap')
+```
+
+## Save pre-cc but cc-clustered data
+```{r}
+saveRDS(dat_mb231_norm, './data/rds/mb231_ccclustered_precc_singlets.rds')
+saveRDS(dat_h1806_norm, './data/rds/h1806_ccclustered_precc_singlets.rds')
+```
+
+
+
+
+
+

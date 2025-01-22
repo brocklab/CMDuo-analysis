@@ -1,0 +1,153 @@
+```{r, show=FALSE, warning=FALSE, quiet=TRUE}
+library(tidyverse)
+library(Seurat)
+library(wesanderson)
+library(scales)
+library(ComplexHeatmap)
+library(circlize)
+`%notin%` <- negate(`%in%`)
+source('functions/color_mapping.R')
+fig_path <- "./plots/markergene/"
+```
+
+## Load data
+```{r}
+mb231 <- readRDS('./data/rds/mb231_colors_cellclass_hclust_nb-barassigned_ccclustered_precc_singlets.rds')
+h1806 <- readRDS('./data/rds/h1806_colors_cellclass_hclust_nb-barassigned_ccclustered_precc_singlets.rds')
+```
+
+## Find cluster marker genes
+Perform simple wilcoxon rank sum test to identify cluster marker genes
+```{r wilcox find markers}
+Idents(mb231) <- 'clust'
+Idents(h1806) <- 'clust'
+
+# find marker genes for each cluster using a simple wilcoxon test
+mb231_markers <- FindAllMarkers(mb231,
+                          test.use ='wilcox',
+                   logfc.threshold = 0.1,
+                           min.pct = 0.6,
+                          only.pos = TRUE)
+
+h1806_markers <- FindAllMarkers(h1806,
+                          test.use ='wilcox',
+                   logfc.threshold = 0.1,
+                           min.pct = 0.6,
+                          only.pos = TRUE)
+
+write.table(mb231_markers %>% mutate(cellline = 'mb231'), file=paste0('outdata/clusters/metacluster_markergenes_mb231.tsv'), quote=FALSE, sep='\t', col.names = TRUE)
+write.table(h1806_markers %>% mutate(cellline = 'h1806'), file=paste0('outdata/clusters/metacluster_markergenes_h1806.tsv'), quote=FALSE, sep='\t', col.names = TRUE)
+```
+
+```{r}
+# load marker genes
+mb231_markers <- read.csv('outdata/clusters/metacluster_markergenes_mb231.tsv',sep='\t')
+h1806_markers <- read.csv('outdata/clusters/metacluster_markergenes_h1806.tsv',sep='\t')
+```
+
+```{r}
+make_marker_heatmap <- function(obj, markers, n_clust_genes = 10, l2fc_min = 0.5, plot_width=12, file_name = ''){
+    # choose marker genes
+  markergenes <- markers %>% 
+    filter(gene %notin% c('EGFP','MCHERRY')) %>%
+    group_by(cluster) %>% 
+    arrange(desc(avg_log2FC)) %>% 
+    filter(avg_log2FC > l2fc_min) %>% 
+    slice_head(n=n_clust_genes) %>% 
+    pull(gene) %>% unique()
+  
+  # only keep data from barcoded cells
+  obj_bc <- subset(obj, subset = n_bar_cell >= 1)
+  
+  # rescale data on markergenes for plotting
+  obj_bc@assays$RNA$scale.data <- NULL
+  obj_bc <- ScaleData(obj_bc, features = markergenes)
+  
+  normcounts <- FetchData(obj_bc, vars = markergenes, layer='scale.data')
+  
+  meta <- obj_bc@meta.data %>% 
+    mutate(cell_class = case_when(fusion=='fusion' ~ 'fusion', n_isFusionParent >= 1 ~ 'parent', .default = 'not \nclassified')) %>%
+    dplyr::select(clust, cell_class, barpairid, clone_color)
+  
+  expression_dat <- left_join(meta %>% rownames_to_column('cellid'), 
+                              normcounts %>% rownames_to_column('cellid'), by='cellid') %>% 
+    mutate(cell_class = factor(cell_class, levels=c('fusion','parent','not classified'))) %>% 
+    arrange(clust, cell_class, barpairid, clone_color)
+  
+  normcountsx <- expression_dat %>% 
+    dplyr::select(-c('cell_class','clust','barpairid','clone_color')) %>% 
+    column_to_rownames('cellid')
+  
+  t_normcounts <- t(normcountsx)
+  
+  plot_annotation_top <- expression_dat %>% 
+    select(c('cellid','cell_class','clust','barpairid','clone_color')) %>% 
+    column_to_rownames('cellid')
+  
+  plot_annotation_top$clust <- as.factor(plot_annotation_top$clust)
+
+  clone_colors <- get_clone_colors(obj_bc)
+  
+  heat_ana <- Heatmap(t_normcounts, name = "Scaled \nexpression",
+          cluster_rows = FALSE,
+          cluster_columns = FALSE, 
+          show_column_names = FALSE,
+          column_split = factor(plot_annotation_top$clust),
+          use_raster = FALSE,
+          column_gap = unit(1, "mm"),
+          row_names_gp = gpar(fontsize = 5),
+          column_names_gp = gpar(fontsize = 8),
+          row_names_side = "left",
+          col=colorRamp2(c(-2, 0, 3), c("magenta", "black", "yellow")),
+          top_annotation = HeatmapAnnotation(
+                    Cluster = plot_annotation_top$clust,
+               `Cell class` = plot_annotation_top$cell_class, 
+                      Clone = plot_annotation_top$barpairid,
+                        col = list(`Cell class` = c("fusion"="#c27100","parent"="grey30", 'not classified'='grey80'),
+                                        Cluster = clust_colors, 
+                                          Clone = clone_colors),
+            show_legend = c(TRUE, TRUE, FALSE))
+          )
+  
+  SaveFigure(heat_ana, paste0(file_name,'_metacluster_heatmap'), type = "png", width=plot_width, height=8, res=600)
+}
+
+make_marker_heatmap(obj= mb231, markers= mb231_markers, n_clust_genes = 20, l2fc_min = 0.5, file_name = 'mb231_wide', plot_width=14.1)
+
+make_marker_heatmap(obj= h1806, markers= h1806_markers, n_clust_genes = 20, l2fc_min = 0.5, file_name = 'h1806', plot_width=11.9)
+```
+
+
+
+
+Save top 30 markers for each cluster
+```{r}
+save_markers_mb231 <- mb231_markers %>% 
+  group_by(cluster) %>% 
+  filter(avg_log2FC > 0 ) %>% 
+  mutate(score = -log10(p_val_adj+0.01)*avg_log2FC) %>% 
+  arrange(desc(score)) %>% 
+  slice_head(n=30) %>% 
+  select(cluster, gene) %>% 
+  group_by(cluster) %>% 
+  summarize(marker_genes = list(unique(gene))) %>%
+  rowwise() %>% 
+  mutate(marker_genes = paste(marker_genes, collapse=', '))
+
+save_markers_h1806 <- h1806_markers %>% 
+  group_by(cluster) %>% 
+  filter(avg_log2FC > 0 ) %>% 
+  mutate(score = -log10(p_val_adj+0.01)*avg_log2FC) %>% 
+  arrange(desc(score)) %>% 
+  slice_head(n=30) %>% 
+  select(cluster, gene) %>% 
+  group_by(cluster) %>% 
+  summarize(marker_genes = list(unique(gene))) %>%
+  rowwise() %>% 
+  mutate(marker_genes = paste(marker_genes, collapse=', '))
+
+write.table(save_markers_mb231, file='outdata/clusters/top30_clusterMarkerGenes_mb231.tsv', quote=FALSE, sep='\t', col.names = TRUE)
+
+write.table(save_markers_h1806, file='outdata/clusters/top30_clusterMarkerGenes_h1806.tsv', quote=FALSE, sep='\t', col.names = TRUE)
+```
+
