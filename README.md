@@ -1,6 +1,6 @@
 This repo contains all code to reproduce analysis and figures in "Mapping cell-cell fusion at single-cell resolution" (https://doi.org/10.1101/2024.12.11.627873)
 
-### Accessing raw data
+## Accessing raw data
 Raw and processed single cell RNA-sequencing can be downloaded from GEO with accession number GSE286213. Targeted barcode sequencing to generate a list of barcodes in the samples using pycashier can be downloaded from Gene Expression Omnibus (GEO) with accession number GSE286212.
 
 In notebooks 7-13, the `h1806_colors_cellclass_hclust_nb-barassigned_ccclustered_precc_singlets.rds` is equivalent to 
@@ -10,7 +10,7 @@ In notebooks 7-13, the `h1806_colors_cellclass_hclust_nb-barassigned_ccclustered
 To start from raw sequencing data, follow the notes in `00_Raw_data_processing_and_alignment_notes.md`
 
 
-### Setting up the Rstudio analysis environment
+## Setting up the Rstudio analysis environment
 To setup your analysis environment, download the Docker Image which is equipped to launch Rstudio with all the necessary packages and versions:
 `docker pull phdidi/cmduo_rocker:latest`
 
